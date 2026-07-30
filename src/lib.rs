@@ -64,13 +64,67 @@ impl Module for MyModule {
                 return Ok(());
             }
             info!("dump {}", package_name);
+
+            // Hook CẢ 2 symbol OpenCommon đã xác nhận tồn tại trên thiết bị
+            // này (qua `nm -D libdexfile.so`): DexFileLoader::OpenCommon
+            // (interface/wrapper phổ biến) và ArtDexFileLoader::OpenCommon
+            // (implementation cụ thể). Một số app/packer có thể gọi thẳng
+            // vào implementation, bỏ qua interface — hook cả 2 để không bỏ
+            // sót trường hợp nào.
             let open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE")
-                .ok_or_else(|| anyhow::anyhow!("resolve symbol error"))?;
-            info!("open_common addr: {:x}", open_common as usize);
+                .ok_or_else(|| anyhow::anyhow!("resolve symbol error (DexFileLoader)"))?;
+            info!("DexFileLoader::open_common addr: {:x}", open_common as usize);
             unsafe {
                 OLD_OPEN_COMMON =
                     dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
             };
+
+            let art_open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art16ArtDexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_13DexFileLoader12VerifyResultE");
+            match art_open_common {
+                Some(addr) => {
+                    info!("ArtDexFileLoader::open_common addr: {:x}", addr as usize);
+                    unsafe {
+                        OLD_ART_OPEN_COMMON =
+                            dobby_rs::hook(addr, new_art_open_common_wrapper as Address)? as usize
+                    };
+                }
+                None => {
+                    error!("resolve symbol error (ArtDexFileLoader), continuing with DexFileLoader hook only");
+                }
+            }
+
+            // ================================================================
+            // Hook RegisterNatives để bắt lúc libl5e5d2631.so đăng ký các hàm
+            // native (F5e5d2631_00, I5e5d2631_00, ...) — vì nm -D xác nhận
+            // các hàm này KHÔNG được export theo tên JNI chuẩn (Java_...),
+            // nên chỉ có thể bắt được con trỏ hàm thật tại đúng thời điểm
+            // JNI_OnLoad gọi RegisterNatives() để đăng ký chúng.
+            //
+            // RegisterNatives không phải 1 symbol export tĩnh theo tên C —
+            // nó là 1 CON TRỎ HÀM bên trong struct JNINativeInterface mà
+            // mỗi JNIEnv* trỏ tới (jni.h: (*env)->RegisterNatives(...)).
+            // Ta lấy đúng con trỏ đó từ chính self.env đang có sẵn, rồi
+            // patch nó bằng dobby_rs::hook — không cần resolve theo tên.
+            // ================================================================
+            unsafe {
+                let raw_env = self.env.get_raw();
+                // JNINativeInterface là 1 bảng con trỏ hàm (function table).
+                // RegisterNatives nằm ở offset cố định trong bảng này theo
+                // chuẩn JNI (index #215 trong JNINativeInterface, tính từ 0,
+                // theo thứ tự khai báo chuẩn trong jni.h của Android NDK).
+                let functions = (*raw_env).functions;
+                let register_natives_ptr = (*functions).RegisterNatives
+                    .ok_or_else(|| anyhow::anyhow!("RegisterNatives function pointer is null"))?;
+
+                info!("RegisterNatives original addr: {:x}", register_natives_ptr as usize);
+
+                OLD_REGISTER_NATIVES = dobby_rs::hook(
+                    register_natives_ptr as Address,
+                    new_register_natives_wrapper as Address,
+                )? as usize;
+
+                info!("RegisterNatives hooked successfully");
+            }
 
             Ok(())
         };
@@ -88,6 +142,8 @@ impl Module for MyModule {
 
 register_zygisk_module!(MyModule);
 static mut OLD_OPEN_COMMON: usize = 0;
+static mut OLD_ART_OPEN_COMMON: usize = 0;
+static mut OLD_REGISTER_NATIVES: usize = 0;
 
 #[unsafe(naked)]
 pub extern "C" fn new_open_common_wrapper() {
@@ -117,6 +173,43 @@ pub extern "C" fn new_open_common_wrapper() {
         br x16"#,
         new_open_common = sym new_open_common,
         old_open_common = sym OLD_OPEN_COMMON,
+        // options(noreturn)
+    );
+}
+
+// Wrapper thứ 2, dành riêng cho ArtDexFileLoader::OpenCommon. Chữ ký
+// tham số giống hệt DexFileLoader::OpenCommon (đã xác nhận qua `nm -D`
+// trên thiết bị: cùng PKhm... ở đầu), nên dùng lại chung hàm xử lý
+// new_open_common ở Rust, chỉ khác trampoline quay lại (OLD_ART_OPEN_COMMON
+// thay vì OLD_OPEN_COMMON) vì đây là 2 hàm gốc khác nhau trong binary.
+#[unsafe(naked)]
+pub extern "C" fn new_art_open_common_wrapper() {
+    naked_asm!(
+        r#"
+        sub sp, sp, 0x280
+        stp x29, x30, [sp, #0]
+        stp x0, x1, [sp, #0x10]
+        stp x2, x3, [sp, #0x20]
+        stp x4, x5, [sp, #0x30]
+        stp x6, x7, [sp, #0x40]
+        stp x8, x9, [sp, #0x50]
+
+        mov x0, x1
+        mov x1, x2
+        bl {new_open_common}
+
+        ldp x29, x30, [sp, #0]
+        ldp x0, x1, [sp, #0x10]
+        ldp x2, x3, [sp, #0x20]
+        ldp x4, x5, [sp, #0x30]
+        ldp x6, x7, [sp, #0x40]
+        ldp x8, x9, [sp, #0x50]
+        add sp, sp, 0x280
+        adrp x16, {old_art_open_common}
+        ldr x16, [x16, #:lo12:{old_art_open_common}]
+        br x16"#,
+        new_open_common = sym new_open_common,
+        old_art_open_common = sym OLD_ART_OPEN_COMMON,
         // options(noreturn)
     );
 }
@@ -154,5 +247,226 @@ extern "C" fn new_open_common(base: usize, size: usize) {
     let file_name = format!("/data/data/{}/dexes/{:08x}.dex", package, digest.finalize());
     if let Err(e) = std::fs::write(file_name, dex_data) {
         error!("write file error: {:?}", e);
+    }
+}
+
+// =====================================================================
+// Hook RegisterNatives — chữ ký C chuẩn, dùng extern "C" bình thường
+// (không cần naked_asm vì đây không phải C++ method với ABI đặc biệt).
+//
+// jint RegisterNatives(JNIEnv *env, jclass clazz,
+//                       const JNINativeMethod *methods, jint nMethods);
+//
+// struct JNINativeMethod { const char* name; const char* signature; void* fnPtr; };
+// =====================================================================
+
+#[repr(C)]
+struct JNINativeMethodRaw {
+    name: *const std::os::raw::c_char,
+    signature: *const std::os::raw::c_char,
+    fn_ptr: *mut std::os::raw::c_void,
+}
+
+static mut TARGET_METHOD_ADDR: usize = 0;
+static mut OLD_F5E5D2631_00: usize = 0;
+
+extern "system" fn new_register_natives_wrapper(
+    env: *mut jni_sys::JNIEnv,
+    clazz: jni_sys::jclass,
+    methods: *const JNINativeMethodRaw,
+    n_methods: jni_sys::jint,
+) -> jni_sys::jint {
+    unsafe {
+        // Lấy tên class đang đăng ký native methods, để log cho biết
+        // ngữ cảnh (class nào gọi RegisterNatives) — hữu ích để xác nhận
+        // đúng đây là v5e5d2631/m5e5d2631 namespace trước khi đào sâu.
+        let class_name = get_class_name_safe(env, clazz);
+        info!(
+            "RegisterNatives called: class={} n_methods={}",
+            class_name, n_methods
+        );
+
+        for i in 0..n_methods as isize {
+            let m = &*methods.offset(i);
+            let name = std::ffi::CStr::from_ptr(m.name)
+                .to_string_lossy()
+                .to_string();
+            let sig = std::ffi::CStr::from_ptr(m.signature)
+                .to_string_lossy()
+                .to_string();
+
+            info!(
+                "  native method: {} sig={} fnPtr=0x{:x}",
+                name, sig, m.fn_ptr as usize
+            );
+
+            // Mục tiêu chính: F5e5d2631_00 — dispatcher chung của toàn bộ
+            // method bị virtualize, xác nhận từ log crash trước đó nhận
+            // (int methodId, Object[] args).
+            if name == "F5e5d2631_00" && TARGET_METHOD_ADDR == 0 {
+                TARGET_METHOD_ADDR = m.fn_ptr as usize;
+                info!(
+                    "!!! FOUND F5e5d2631_00 dispatcher @ 0x{:x}, class={} !!!",
+                    TARGET_METHOD_ADDR, class_name
+                );
+
+                // Hook luôn ngay tại đây — dispatcher này nhận
+                // (JNIEnv*, jclass, jint methodId, jobjectArray args)
+                // theo chuẩn JNI static native method.
+                match dobby_rs::hook(
+                    TARGET_METHOD_ADDR as Address,
+                    new_f5e5d2631_00_wrapper as Address,
+                ) {
+                    Ok(old) => {
+                        OLD_F5E5D2631_00 = old as usize;
+                        info!("F5e5d2631_00 hooked successfully, trampoline=0x{:x}", OLD_F5E5D2631_00);
+                    }
+                    Err(e) => {
+                        error!("failed to hook F5e5d2631_00: {:?}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Gọi hàm gốc để RegisterNatives vẫn hoạt động bình thường — KHÔNG
+    // được chặn lời gọi thật, nếu không app sẽ crash vì thiếu native
+    // method implementation.
+    unsafe {
+        let orig: extern "system" fn(
+            *mut jni_sys::JNIEnv,
+            jni_sys::jclass,
+            *const JNINativeMethodRaw,
+            jni_sys::jint,
+        ) -> jni_sys::jint = std::mem::transmute(OLD_REGISTER_NATIVES);
+        orig(env, clazz, methods, n_methods)
+    }
+}
+
+unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass) -> String {
+    // Dùng trực tiếp function table thay vì crate `jni` cấp cao để tránh
+    // panic nếu env/clazz không hợp lệ trong 1 vài edge case hiếm.
+    let functions = (*env).functions;
+    let get_object_class = match (*functions).GetObjectClass {
+        Some(f) => f,
+        None => return "?".to_string(),
+    };
+    let class_of_class = get_object_class(env, clazz as jni_sys::jobject);
+
+    // Gọi java.lang.Class#getName() qua JNI thủ công để lấy tên dạng
+    // "a.b.C" (không dùng crate jni cấp cao để giảm rủi ro panic ở
+    // native callback — 1 panic ở đây có thể crash toàn bộ app).
+    let find_class = match (*functions).FindClass {
+        Some(f) => f,
+        None => return "?".to_string(),
+    };
+    let get_method_id = match (*functions).GetMethodID {
+        Some(f) => f,
+        None => return "?".to_string(),
+    };
+    let call_object_method = match (*functions).CallObjectMethodA {
+        Some(f) => f,
+        None => return "?".to_string(),
+    };
+    let get_string_utf_chars = match (*functions).GetStringUTFChars {
+        Some(f) => f,
+        None => return "?".to_string(),
+    };
+
+    let class_class_name = std::ffi::CString::new("java/lang/Class").unwrap();
+    let class_class = find_class(env, class_class_name.as_ptr());
+    if class_class.is_null() {
+        return "?".to_string();
+    }
+
+    let method_name = std::ffi::CString::new("getName").unwrap();
+    let sig = std::ffi::CString::new("()Ljava/lang/String;").unwrap();
+    let get_name_method = get_method_id(env, class_class, method_name.as_ptr(), sig.as_ptr());
+    if get_name_method.is_null() {
+        return "?".to_string();
+    }
+
+    let name_jstring = call_object_method(env, class_of_class, get_name_method, std::ptr::null());
+    if name_jstring.is_null() {
+        return "?".to_string();
+    }
+
+    let mut is_copy: jni_sys::jboolean = 0;
+    let c_str = get_string_utf_chars(env, name_jstring as jni_sys::jstring, &mut is_copy);
+    if c_str.is_null() {
+        return "?".to_string();
+    }
+
+    let result = std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string();
+    result
+}
+
+// =====================================================================
+// Hook cho chính F5e5d2631_00 — dispatcher static native, chữ ký xác
+// nhận từ log crash: void F5e5d2631_00(int methodId, Object[] args)
+// Vì là STATIC method, tham số JNI thật sự nhận vào là:
+//   (JNIEnv*, jclass, jint methodId, jobjectArray args)
+// "Object[]" trong Java tương ứng jobjectArray ở tầng JNI, không phải
+// jobject đơn — quan trọng để đọc đúng args nếu cần mở rộng sau này.
+// =====================================================================
+extern "system" fn new_f5e5d2631_00_wrapper(
+    env: *mut jni_sys::JNIEnv,
+    clazz: jni_sys::jclass,
+    method_id: jni_sys::jint,
+    args: jni_sys::jobjectArray,
+) {
+    info!(
+        "F5e5d2631_00 CALLED: methodId={} (0x{:x}) args_ptr=0x{:x}",
+        method_id, method_id, args as usize
+    );
+
+    // Log ra file riêng để dễ đối chiếu theo thời gian, vì logcat có thể
+    // bị rotate/mất nếu app chạy lâu. Đồng thời log luôn độ dài mảng
+    // args (nếu đọc được) để biết mỗi methodId truyền vào bao nhiêu
+    // tham số — hữu ích khi đối chiếu ngược với DEX đã dump được.
+    unsafe {
+        let array_len = if !args.is_null() {
+            let functions = (*env).functions;
+            match (*functions).GetArrayLength {
+                Some(get_len) => get_len(env, args as jni_sys::jarray),
+                None => -1,
+            }
+        } else {
+            -1
+        };
+
+        if let Ok(cmdline) = std::fs::read_to_string("/proc/self/cmdline") {
+            if let Some(package) = cmdline.split('\0').next() {
+                let dir = format!("/data/data/{}/dexes", package);
+                let _ = std::fs::create_dir_all(&dir);
+                let log_path = format!("{}/method_calls.log", dir);
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    use std::io::Write;
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let _ = writeln!(
+                        f,
+                        "[{}] methodId={} args_ptr=0x{:x} args_len={}",
+                        ts, method_id, args as usize, array_len
+                    );
+                }
+            }
+        }
+    }
+
+    unsafe {
+        let orig: extern "system" fn(
+            *mut jni_sys::JNIEnv,
+            jni_sys::jclass,
+            jni_sys::jint,
+            jni_sys::jobjectArray,
+        ) = std::mem::transmute(OLD_F5E5D2631_00);
+        orig(env, clazz, method_id, args)
     }
 }
