@@ -2,6 +2,7 @@ use dobby_rs::Address;
 use jni::JNIEnv;
 use log::{error, info, trace};
 use nix::{fcntl::OFlag, sys::stat::Mode};
+use std::sync::atomic::{AtomicUsize, Ordering};
 // use std::arch::asm;
 use std::arch::naked_asm;
 use std::{
@@ -74,19 +75,19 @@ impl Module for MyModule {
             let open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE")
                 .ok_or_else(|| anyhow::anyhow!("resolve symbol error (DexFileLoader)"))?;
             info!("DexFileLoader::open_common addr: {:x}", open_common as usize);
-            unsafe {
-                OLD_OPEN_COMMON =
-                    dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
+            let hooked1 = unsafe {
+                dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
             };
+            OLD_OPEN_COMMON.store(hooked1, Ordering::SeqCst);
 
             let art_open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art16ArtDexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_13DexFileLoader12VerifyResultE");
             match art_open_common {
                 Some(addr) => {
                     info!("ArtDexFileLoader::open_common addr: {:x}", addr as usize);
-                    unsafe {
-                        OLD_ART_OPEN_COMMON =
-                            dobby_rs::hook(addr, new_art_open_common_wrapper as Address)? as usize
+                    let hooked2 = unsafe {
+                        dobby_rs::hook(addr, new_art_open_common_wrapper as Address)? as usize
                     };
+                    OLD_ART_OPEN_COMMON.store(hooked2, Ordering::SeqCst);
                 }
                 None => {
                     error!("resolve symbol error (ArtDexFileLoader), continuing with DexFileLoader hook only");
@@ -121,10 +122,11 @@ impl Module for MyModule {
 
                 info!("RegisterNatives original addr: {:x}", register_natives_ptr as usize);
 
-                OLD_REGISTER_NATIVES = dobby_rs::hook(
+                let hooked_addr = dobby_rs::hook(
                     register_natives_ptr as Address,
                     new_register_natives_wrapper as Address,
                 )? as usize;
+                OLD_REGISTER_NATIVES.store(hooked_addr, Ordering::SeqCst);
 
                 info!("RegisterNatives hooked successfully");
             }
@@ -144,9 +146,17 @@ impl Module for MyModule {
 }
 
 register_zygisk_module!(MyModule);
-static mut OLD_OPEN_COMMON: usize = 0;
-static mut OLD_ART_OPEN_COMMON: usize = 0;
-static mut OLD_REGISTER_NATIVES: usize = 0;
+// Cả 5 biến dưới đây dùng AtomicUsize theo khuyến nghị chính thức của
+// Rust — tránh lint "creating a shared reference to mutable static"
+// (hard error từ Rust 2024 edition). Đã xác nhận qua tài liệu Rust
+// Reference: `sym` trong naked_asm! chấp nhận bất kỳ `static` item nào
+// (kể cả AtomicUsize, vì nó có cùng bộ nhớ layout với usize nhờ
+// #[repr(transparent)]) — KHÔNG bắt buộc phải là `static mut` như từng
+// nhầm tưởng trước đó. AtomicUsize còn có lợi ích phụ: an toàn thực sự
+// khi bị đọc/ghi đồng thời từ nhiều thread.
+static OLD_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
+static OLD_ART_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
+static OLD_REGISTER_NATIVES: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(naked)]
 pub extern "C" fn new_open_common_wrapper() {
@@ -270,8 +280,8 @@ struct JNINativeMethodRaw {
     fn_ptr: *mut std::os::raw::c_void,
 }
 
-static mut TARGET_METHOD_ADDR: usize = 0;
-static mut OLD_F5E5D2631_00: usize = 0;
+static TARGET_METHOD_ADDR: AtomicUsize = AtomicUsize::new(0);
+static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
 
 extern "system" fn new_register_natives_wrapper(
     env: *mut jni_sys::JNIEnv,
@@ -306,23 +316,27 @@ extern "system" fn new_register_natives_wrapper(
             // Mục tiêu chính: F5e5d2631_00 — dispatcher chung của toàn bộ
             // method bị virtualize, xác nhận từ log crash trước đó nhận
             // (int methodId, Object[] args).
-            if name == "F5e5d2631_00" && TARGET_METHOD_ADDR == 0 {
-                TARGET_METHOD_ADDR = m.fn_ptr as usize;
+            if name == "F5e5d2631_00"
+                && TARGET_METHOD_ADDR.load(Ordering::SeqCst) == 0
+            {
+                let fn_addr = m.fn_ptr as usize;
+                TARGET_METHOD_ADDR.store(fn_addr, Ordering::SeqCst);
                 info!(
                     "!!! FOUND F5e5d2631_00 dispatcher @ 0x{:x}, class={} !!!",
-                    TARGET_METHOD_ADDR, class_name
+                    fn_addr, class_name
                 );
 
                 // Hook luôn ngay tại đây — dispatcher này nhận
                 // (JNIEnv*, jclass, jint methodId, jobjectArray args)
                 // theo chuẩn JNI static native method.
                 match dobby_rs::hook(
-                    TARGET_METHOD_ADDR as Address,
+                    fn_addr as Address,
                     new_f5e5d2631_00_wrapper as Address,
                 ) {
                     Ok(old) => {
-                        OLD_F5E5D2631_00 = old as usize;
-                        info!("F5e5d2631_00 hooked successfully, trampoline=0x{:x}", OLD_F5E5D2631_00);
+                        let old_addr = old as usize;
+                        OLD_F5E5D2631_00.store(old_addr, Ordering::SeqCst);
+                        info!("F5e5d2631_00 hooked successfully, trampoline=0x{:x}", old_addr);
                     }
                     Err(e) => {
                         error!("failed to hook F5e5d2631_00: {:?}", e);
@@ -341,7 +355,7 @@ extern "system" fn new_register_natives_wrapper(
             jni_sys::jclass,
             *const JNINativeMethodRaw,
             jni_sys::jint,
-        ) -> jni_sys::jint = std::mem::transmute(OLD_REGISTER_NATIVES);
+        ) -> jni_sys::jint = std::mem::transmute(OLD_REGISTER_NATIVES.load(Ordering::SeqCst));
         orig(env, clazz, methods, n_methods)
     }
 }
@@ -469,7 +483,7 @@ extern "system" fn new_f5e5d2631_00_wrapper(
             jni_sys::jclass,
             jni_sys::jint,
             jni_sys::jobjectArray,
-        ) = std::mem::transmute(OLD_F5E5D2631_00);
+        ) = std::mem::transmute(OLD_F5E5D2631_00.load(Ordering::SeqCst));
         orig(env, clazz, method_id, args)
     }
 }
