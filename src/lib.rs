@@ -108,12 +108,15 @@ impl Module for MyModule {
             // ================================================================
             unsafe {
                 let raw_env = self.env.get_raw();
-                // JNINativeInterface là 1 bảng con trỏ hàm (function table).
-                // RegisterNatives nằm ở offset cố định trong bảng này theo
-                // chuẩn JNI (index #215 trong JNINativeInterface, tính từ 0,
-                // theo thứ tự khai báo chuẩn trong jni.h của Android NDK).
-                let functions = (*raw_env).functions;
-                let register_natives_ptr = (*functions).RegisterNatives
+                // Theo chuẩn JNI (jni.h): JNIEnv là con trỏ tới con trỏ
+                // tới function table (JNINativeInterface_). Tức là:
+                //   raw_env: *mut JNIEnv  ==  *mut *const JNINativeInterface_
+                // Deref 1 lần (*raw_env) để lấy con trỏ tới bảng hàm,
+                // rồi deref thêm 1 lần nữa ((*raw_env) đã là con trỏ,
+                // deref thêm để lấy giá trị struct) mới truy cập được
+                // field RegisterNatives bên trong.
+                let functions_ptr: *const jni_sys::JNINativeInterface_ = *raw_env;
+                let register_natives_ptr = (*functions_ptr).RegisterNatives
                     .ok_or_else(|| anyhow::anyhow!("RegisterNatives function pointer is null"))?;
 
                 info!("RegisterNatives original addr: {:x}", register_natives_ptr as usize);
@@ -344,9 +347,9 @@ extern "system" fn new_register_natives_wrapper(
 }
 
 unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass) -> String {
-    // Dùng trực tiếp function table thay vì crate `jni` cấp cao để tránh
-    // panic nếu env/clazz không hợp lệ trong 1 vài edge case hiếm.
-    let functions = (*env).functions;
+    // env: *mut JNIEnv == *mut *const JNINativeInterface_ (chuẩn JNI).
+    // Deref 1 lần để lấy con trỏ tới bảng hàm thật.
+    let functions: *const jni_sys::JNINativeInterface_ = *env;
     let get_object_class = match (*functions).GetObjectClass {
         Some(f) => f,
         None => return "?".to_string(),
@@ -426,7 +429,7 @@ extern "system" fn new_f5e5d2631_00_wrapper(
     // tham số — hữu ích khi đối chiếu ngược với DEX đã dump được.
     unsafe {
         let array_len = if !args.is_null() {
-            let functions = (*env).functions;
+            let functions: *const jni_sys::JNINativeInterface_ = *env;
             match (*functions).GetArrayLength {
                 Some(get_len) => get_len(env, args as jni_sys::jarray),
                 None => -1,
