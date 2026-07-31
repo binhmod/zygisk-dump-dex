@@ -1,4 +1,4 @@
-name: Build Zygisk Dump Dex
+name: Build Dump Dex Payload (ctor)
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 
 jobs:
   build:
-    name: Build Project
+    name: Build Payload
     runs-on: ubuntu-latest
 
     steps:
@@ -23,18 +23,20 @@ jobs:
           target: aarch64-linux-android
           override: true
 
-      - name: Install Just
-        run: cargo install just
-
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
 
-      - name: Build project
-        run: just package-release
+      - name: Build payload (release)
+        run: cargo ndk -t arm64-v8a --platform=29 build --release
 
-      - name: Upload built artifact
+      - name: Rename output for Zygisk-Loader convention
+        run: |
+          mkdir -p out
+          cp target/aarch64-linux-android/release/libdump_dex_payload.so out/payload_dumpdex.so
+          ls -la out/
+
+      - name: Upload built payload
         uses: actions/upload-artifact@v4
         with:
-          name: zygisk-debug-zip
-          path: out/zygisk-*.zip
-          compression-level: 9
+          name: payload_dumpdex
+          path: out/payload_dumpdex.so
