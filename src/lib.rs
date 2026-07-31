@@ -19,15 +19,71 @@ struct MyModule {
 
 impl Module for MyModule {
     fn new(api: Api, env: *mut jni_sys::JNIEnv) -> Self {
+        // DEBUG: ghi thẳng ra file ngay lập tức, KHÔNG qua log/android_logger,
+        // để loại trừ khả năng android_logger bị lỗi/chưa init xong khiến
+        // mọi log sau đó bị nuốt mất một cách âm thầm. Nếu Module::new()
+        // thực sự được Zygisk gọi, file này PHẢI xuất hiện dù mọi thứ khác
+        // có lỗi gì đi nữa (miễn là /data/local/tmp ghi được).
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/local/tmp/dump_dex_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(
+                    f,
+                    "[{}] Module::new() called, pid={}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    std::process::id()
+                )
+            });
+
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Info)
                 .with_tag("dump_dex"),
         );
+
+        // DEBUG thứ 2: ghi tiếp sau khi init_once để biết chính xác dòng
+        // này có chạy tới hay không (phân biệt với crash TRONG init_once).
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/local/tmp/dump_dex_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "android_logger::init_once() completed")
+            });
+
+        info!("=== dump_dex Module::new() via log crate ===");
+
         let env = unsafe { JNIEnv::from_raw(env.cast()).unwrap() };
+
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/local/tmp/dump_dex_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "JNIEnv::from_raw() completed, Module::new() returning")
+            });
+
         Self { api, env }
     }
     fn pre_app_specialize(&mut self, args: &mut AppSpecializeArgs) {
+        // DEBUG: xác nhận pre_app_specialize được gọi, ghi luôn package
+        // name thô (chưa qua bất kỳ xử lý gì) để biết có tới được đây không.
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/local/tmp/dump_dex_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "pre_app_specialize() ENTER, pid={}", std::process::id())
+            });
         let mut inner = || -> anyhow::Result<()> {
             let package_name = self
                 .env
