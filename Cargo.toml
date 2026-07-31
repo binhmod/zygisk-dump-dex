@@ -17,7 +17,7 @@ zygisk-rs = { git = "https://github.com/Tools-cx-app/zygisk-rs.git", default-fea
 
 [lib]
 name = "zygisk"
-crate-type = ["dylib"]
+crate-type = ["cdylib"]
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = "^0.14"
