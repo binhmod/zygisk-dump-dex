@@ -1,218 +1,153 @@
-use dobby_rs::Address;
-use jni::JNIEnv;
-use log::{error, info, trace};
-use nix::{fcntl::OFlag, sys::stat::Mode};
-use std::sync::atomic::{AtomicUsize, Ordering};
-// use std::arch::asm;
-use std::arch::naked_asm;
-use std::{
-    fs::File,
-    io::Read,
-    os::fd::{AsRawFd, FromRawFd},
-};
-use zygisk_rs::{register_zygisk_module, Api, AppSpecializeArgs, Module, ServerSpecializeArgs};
+// =========================================================================
+// dump_dex_payload.rs
+// -----------------------------------------------------------------------
+// Payload theo pattern của Zygisk-Loader (github.com/HanSoBored/Zygisk-Loader):
+// KHÔNG dùng register_zygisk_module!/Module trait của crate zygisk_rs (vốn
+// yêu cầu framework Zygisk chuẩn tự gọi vào entry point riêng — điều mà
+// Zygisk-Loader không làm, nó chỉ đơn thuần dlopen() file .so như 1 thư
+// viện thường). Thay vào đó dùng #[ctor] — hàm này tự chạy NGAY KHI
+// dlopen() thành công, không cần framework nào gọi vào.
+//
+// Vì không còn Module::pre_app_specialize (nơi trước đây lấy JNIEnv qua
+// Zygisk API self.env), cần lấy JNIEnv bằng cách khác: hook thẳng
+// JNI_OnLoad của chính libl5e5d2631.so — đây là hàm chắc chắn sẽ được
+// gọi với đúng JNIEnv* của tiến trình app, ngay sau khi lib đó tự load.
+//
+// Cargo.toml cần:
+//   [lib]
+//   crate-type = ["cdylib"]
+//   [dependencies]
+//   ctor = "0.2"
+//   android_logger = "0.13"
+//   log = "0.4"
+//   dobby-rs = "..."   (giữ nguyên dependency cũ)
+//   jni-sys = "..."    (giữ nguyên dependency cũ)
+//   anyhow = "..."
+// =========================================================================
 
-struct MyModule {
-    api: Api,
-    env: JNIEnv<'static>,
+use ctor::ctor;
+use dobby_rs::Address;
+use log::{error, info};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::arch::naked_asm;
+
+fn dbg_log(msg: &str) {
+    // Ghi thẳng ra file, KHÔNG qua log/android_logger — dùng làm lớp bảo
+    // hiểm cuối cùng để biết chắc code có chạy tới đâu, kể cả khi
+    // android_logger có vấn đề (giữ nguyên chiến lược debug đã dùng).
+    if let Ok(pkg) = std::fs::read_to_string("/proc/self/cmdline") {
+        let pkg = pkg.split('\0').next().unwrap_or("unknown").to_string();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open("/data/local/tmp/dump_dex_debug.log")
+            .and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "[{}] pid={} pkg={} {}", ts, std::process::id(), pkg, msg)
+            });
+    }
 }
 
-impl Module for MyModule {
-    fn new(api: Api, env: *mut jni_sys::JNIEnv) -> Self {
-        // DEBUG: ghi thẳng ra file ngay lập tức, KHÔNG qua log/android_logger,
-        // để loại trừ khả năng android_logger bị lỗi/chưa init xong khiến
-        // mọi log sau đó bị nuốt mất một cách âm thầm. Nếu Module::new()
-        // thực sự được Zygisk gọi, file này PHẢI xuất hiện dù mọi thứ khác
-        // có lỗi gì đi nữa (miễn là /data/local/tmp ghi được).
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/data/local/tmp/dump_dex_debug.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(
-                    f,
-                    "[{}] Module::new() called, pid={}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0),
-                    std::process::id()
-                )
-            });
+// =========================================================================
+// ENTRY POINT — chạy tự động ngay khi Zygisk-Loader dlopen() file này.
+// =========================================================================
+#[ctor]
+fn init() {
+    dbg_log("ctor init() called");
 
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Info)
-                .with_tag("dump_dex"),
-        );
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("dump_dex"),
+    );
+    info!("=== dump_dex payload init (via #[ctor]) ===");
+    dbg_log("android_logger init_once completed");
 
-        // DEBUG thứ 2: ghi tiếp sau khi init_once để biết chính xác dòng
-        // này có chạy tới hay không (phân biệt với crash TRONG init_once).
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/data/local/tmp/dump_dex_debug.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "android_logger::init_once() completed")
-            });
+    // Vì #[ctor] chạy RẤT SỚM (ngay khi thư viện được nạp), có thể trước
+    // cả khi libl5e5d2631.so đã load xong (nếu Zygisk-Loader inject sớm
+    // hơn lúc app tự System.load() thư viện đó). Cần đợi + poll cho tới
+    // khi libl5e5d2631.so xuất hiện trong tiến trình rồi mới hook.
+    std::thread::spawn(|| {
+        dbg_log("watcher thread started, polling for libl5e5d2631.so + libdexfile.so");
 
-        info!("=== dump_dex Module::new() via log crate ===");
+        for i in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let env = unsafe { JNIEnv::from_raw(env.cast()).unwrap() };
-
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/data/local/tmp/dump_dex_debug.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "JNIEnv::from_raw() completed, Module::new() returning")
-            });
-
-        Self { api, env }
-    }
-    fn pre_app_specialize(&mut self, args: &mut AppSpecializeArgs) {
-        // DEBUG: xác nhận pre_app_specialize được gọi, ghi luôn package
-        // name thô (chưa qua bất kỳ xử lý gì) để biết có tới được đây không.
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open("/data/local/tmp/dump_dex_debug.log")
-            .and_then(|mut f| {
-                use std::io::Write;
-                writeln!(f, "pre_app_specialize() ENTER, pid={}", std::process::id())
-            });
-        let mut inner = || -> anyhow::Result<()> {
-            let package_name = self
-                .env
-                .get_string(unsafe {
-                    (args.nice_name as *mut jni_sys::jstring as *mut ()
-                        as *const jni::objects::JString<'_>)
-                        .as_ref()
-                        .unwrap()
-                })?
-                .to_string_lossy()
-                .to_string();
-            trace!("pre_app_specialize: package_name: {}", package_name);
-            let module_dir = self
-                .api
-                .get_module_dir()
-                .ok_or_else(|| anyhow::anyhow!("get_module_dir error"))?;
-            let mut list_file = unsafe {
-                File::from_raw_fd(nix::fcntl::openat(
-                    Some(module_dir.as_raw_fd()),
-                    "list.txt",
-                    OFlag::O_CLOEXEC,
-                    Mode::empty(),
-                )?)
-            };
-            let mut file_content = String::new();
-            list_file.read_to_string(&mut file_content)?;
-
-            let find: bool = file_content
-                .split("\n")
-                .any(|item| item.trim() == package_name);
-
-            if !find {
-                self.api
-                    .set_option(zygisk_rs::ModuleOption::DlcloseModuleLibrary);
-                return Ok(());
-            }
-            info!("dump {}", package_name);
-
-            // Hook CẢ 2 symbol OpenCommon đã xác nhận tồn tại trên thiết bị
-            // này (qua `nm -D libdexfile.so`): DexFileLoader::OpenCommon
-            // (interface/wrapper phổ biến) và ArtDexFileLoader::OpenCommon
-            // (implementation cụ thể). Một số app/packer có thể gọi thẳng
-            // vào implementation, bỏ qua interface — hook cả 2 để không bỏ
-            // sót trường hợp nào.
-            let open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE")
-                .ok_or_else(|| anyhow::anyhow!("resolve symbol error (DexFileLoader)"))?;
-            info!("DexFileLoader::open_common addr: {:x}", open_common as usize);
-            let hooked1 = unsafe {
-                dobby_rs::hook(open_common, new_open_common_wrapper as Address)? as usize
-            };
-            OLD_OPEN_COMMON.store(hooked1, Ordering::SeqCst);
-
-            let art_open_common = dobby_rs::resolve_symbol("libdexfile.so", "_ZN3art16ArtDexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_13DexFileLoader12VerifyResultE");
-            match art_open_common {
-                Some(addr) => {
-                    info!("ArtDexFileLoader::open_common addr: {:x}", addr as usize);
-                    let hooked2 = unsafe {
-                        dobby_rs::hook(addr, new_art_open_common_wrapper as Address)? as usize
-                    };
-                    OLD_ART_OPEN_COMMON.store(hooked2, Ordering::SeqCst);
-                }
-                None => {
-                    error!("resolve symbol error (ArtDexFileLoader), continuing with DexFileLoader hook only");
+            // --- Hook OpenCommon (libdexfile.so) — chỉ làm 1 lần ---
+            if OPEN_COMMON_HOOKED.load(Ordering::SeqCst) == 0 {
+                if try_hook_open_common() {
+                    OPEN_COMMON_HOOKED.store(1, Ordering::SeqCst);
+                    dbg_log("OpenCommon hooks installed successfully");
                 }
             }
 
-            // ================================================================
-            // Hook RegisterNatives để bắt lúc libl5e5d2631.so đăng ký các hàm
-            // native (F5e5d2631_00, I5e5d2631_00, ...) — vì nm -D xác nhận
-            // các hàm này KHÔNG được export theo tên JNI chuẩn (Java_...),
-            // nên chỉ có thể bắt được con trỏ hàm thật tại đúng thời điểm
-            // JNI_OnLoad gọi RegisterNatives() để đăng ký chúng.
-            //
-            // RegisterNatives không phải 1 symbol export tĩnh theo tên C —
-            // nó là 1 CON TRỎ HÀM bên trong struct JNINativeInterface mà
-            // mỗi JNIEnv* trỏ tới (jni.h: (*env)->RegisterNatives(...)).
-            // Ta lấy đúng con trỏ đó từ chính self.env đang có sẵn, rồi
-            // patch nó bằng dobby_rs::hook — không cần resolve theo tên.
-            // ================================================================
-            unsafe {
-                let raw_env = self.env.get_raw();
-                // Theo chuẩn JNI (jni.h): JNIEnv là con trỏ tới con trỏ
-                // tới function table (JNINativeInterface_). Tức là:
-                //   raw_env: *mut JNIEnv  ==  *mut *const JNINativeInterface_
-                // Deref 1 lần (*raw_env) để lấy con trỏ tới bảng hàm,
-                // rồi deref thêm 1 lần nữa ((*raw_env) đã là con trỏ,
-                // deref thêm để lấy giá trị struct) mới truy cập được
-                // field RegisterNatives bên trong.
-                let functions_ptr: *const jni_sys::JNINativeInterface_ = *raw_env;
-                let register_natives_ptr = (*functions_ptr).RegisterNatives
-                    .ok_or_else(|| anyhow::anyhow!("RegisterNatives function pointer is null"))?;
-
-                info!("RegisterNatives original addr: {:x}", register_natives_ptr as usize);
-
-                let hooked_addr = dobby_rs::hook(
-                    register_natives_ptr as Address,
-                    new_register_natives_wrapper as Address,
-                )? as usize;
-                OLD_REGISTER_NATIVES.store(hooked_addr, Ordering::SeqCst);
-
-                info!("RegisterNatives hooked successfully");
+            // --- Hook JNI_OnLoad của libl5e5d2631.so — chỉ làm 1 lần ---
+            if JNI_ONLOAD_HOOKED.load(Ordering::SeqCst) == 0 {
+                if try_hook_target_jni_onload() {
+                    JNI_ONLOAD_HOOKED.store(1, Ordering::SeqCst);
+                    dbg_log("target JNI_OnLoad hook installed successfully");
+                }
             }
 
-            Ok(())
-        };
-        if let Err(e) = inner() {
-            error!("pre_app_specialize error: {:?}", e);
+            if OPEN_COMMON_HOOKED.load(Ordering::SeqCst) == 1
+                && JNI_ONLOAD_HOOKED.load(Ordering::SeqCst) == 1
+            {
+                dbg_log(&format!("all hooks installed after {} polls, watcher exiting", i));
+                return;
+            }
+        }
+        dbg_log("watcher thread gave up after 100 polls (10s), some hooks may be missing");
+    });
+}
+
+static OPEN_COMMON_HOOKED: AtomicUsize = AtomicUsize::new(0);
+static JNI_ONLOAD_HOOKED: AtomicUsize = AtomicUsize::new(0);
+static OLD_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
+static OLD_ART_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
+static OLD_TARGET_JNI_ONLOAD: AtomicUsize = AtomicUsize::new(0);
+static OLD_REGISTER_NATIVES: AtomicUsize = AtomicUsize::new(0);
+static TARGET_METHOD_ADDR: AtomicUsize = AtomicUsize::new(0);
+static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
+
+// =========================================================================
+// Hook OpenCommon (giữ nguyên logic đã sửa đúng ABI — cả 2 hàm đều là
+// STATIC method, x0 = base thật, không cần dịch thanh ghi).
+// =========================================================================
+fn try_hook_open_common() -> bool {
+    let open_common = match dobby_rs::resolve_symbol(
+        "libdexfile.so",
+        "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE",
+    ) {
+        Some(addr) => addr,
+        None => return false, // libdexfile.so chưa load, thử lại ở vòng poll sau
+    };
+
+    dbg_log(&format!("DexFileLoader::OpenCommon addr: {:x}", open_common as usize));
+    match unsafe { dobby_rs::hook(open_common, new_open_common_wrapper as Address) } {
+        Ok(old) => OLD_OPEN_COMMON.store(old as usize, Ordering::SeqCst),
+        Err(e) => {
+            dbg_log(&format!("hook DexFileLoader::OpenCommon failed: {:?}", e));
+            return false;
         }
     }
 
-    fn post_app_specialize(&mut self, _args: &AppSpecializeArgs) {}
+    if let Some(addr) = dobby_rs::resolve_symbol(
+        "libdexfile.so",
+        "_ZN3art16ArtDexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_13DexFileLoader12VerifyResultE",
+    ) {
+        dbg_log(&format!("ArtDexFileLoader::OpenCommon addr: {:x}", addr as usize));
+        match unsafe { dobby_rs::hook(addr, new_art_open_common_wrapper as Address) } {
+            Ok(old) => OLD_ART_OPEN_COMMON.store(old as usize, Ordering::SeqCst),
+            Err(e) => dbg_log(&format!("hook ArtDexFileLoader::OpenCommon failed: {:?}", e)),
+        }
+    }
 
-    fn pre_server_specialize(&mut self, _args: &mut ServerSpecializeArgs) {}
-
-    fn post_server_specialize(&mut self, _args: &ServerSpecializeArgs) {}
+    true
 }
-
-register_zygisk_module!(MyModule);
-// Cả 5 biến dưới đây dùng AtomicUsize theo khuyến nghị chính thức của
-// Rust — tránh lint "creating a shared reference to mutable static"
-// (hard error từ Rust 2024 edition). Đã xác nhận qua tài liệu Rust
-// Reference: `sym` trong naked_asm! chấp nhận bất kỳ `static` item nào
-// (kể cả AtomicUsize, vì nó có cùng bộ nhớ layout với usize nhờ
-// #[repr(transparent)]) — KHÔNG bắt buộc phải là `static mut` như từng
-// nhầm tưởng trước đó. AtomicUsize còn có lợi ích phụ: an toàn thực sự
-// khi bị đọc/ghi đồng thời từ nhiều thread.
-static OLD_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
-static OLD_ART_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
-static OLD_REGISTER_NATIVES: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(naked)]
 pub extern "C" fn new_open_common_wrapper() {
@@ -240,14 +175,9 @@ pub extern "C" fn new_open_common_wrapper() {
         br x16"#,
         new_open_common = sym new_open_common,
         old_open_common = sym OLD_OPEN_COMMON,
-        // options(noreturn)
     );
 }
 
-// Wrapper thứ 2, dành riêng cho ArtDexFileLoader::OpenCommon. Đã xác
-// nhận qua ART source code thật (art_dex_file_loader.h) rằng đây CŨNG
-// LÀ STATIC METHOD giống DexFileLoader::OpenCommon — không có `this`
-// pointer ẩn, x0 vốn đã là `base` thật, không cần dịch chuyển thanh ghi.
 #[unsafe(naked)]
 pub extern "C" fn new_art_open_common_wrapper() {
     naked_asm!(
@@ -274,55 +204,140 @@ pub extern "C" fn new_art_open_common_wrapper() {
         br x16"#,
         new_open_common = sym new_open_common,
         old_art_open_common = sym OLD_ART_OPEN_COMMON,
-        // options(noreturn)
     );
 }
 
 extern "C" fn new_open_common(base: usize, size: usize) {
+    dbg_log(&format!("find dex: base=0x{:x}, size=0x{:x}", base, size));
     info!("find dex: base=0x{:x}, size=0x{:x}", base, size);
 
-    let dex_data = unsafe { std::slice::from_raw_parts(base as *const u8, size) };
-    let package = match std::fs::read_to_string("/proc/self/cmdline") {
-        Ok(cmdline) => cmdline,
-        Err(e) => {
-            error!("read cmdline error: {:?}", e);
-            return;
-        }
-    };
-    if package.is_empty() {
-        error!("package name is empty");
+    // Sanity check trước khi đọc — tránh crash nếu size bất thường do
+    // đọc nhầm tham số (phòng hờ, dù đã sửa đúng ABI).
+    if size == 0 || size > 200 * 1024 * 1024 {
+        dbg_log(&format!("suspicious size {}, skipping dump", size));
         return;
     }
-    let Some(package) = package.split('\0').next() else {
-        error!("package name split by zero error: {}", package);
+
+    let dex_data = unsafe { std::slice::from_raw_parts(base as *const u8, size) };
+
+    // Xác nhận magic DEX trước khi ghi, tránh dump rác nếu vẫn còn lệch
+    // tham số ở đâu đó chưa phát hiện ra.
+    if dex_data.len() < 8 || &dex_data[0..3] != b"dex" {
+        dbg_log("data does not start with DEX magic, skipping (param offset may still be wrong)");
         return;
+    }
+
+    let package = match std::fs::read_to_string("/proc/self/cmdline") {
+        Ok(c) => c.split('\0').next().unwrap_or("unknown").to_string(),
+        Err(_) => return,
     };
 
     let dir = format!("/data/data/{}/dexes", package);
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        error!("create dir error: {:?}", e);
+    if std::fs::create_dir_all(&dir).is_err() {
+        dbg_log(&format!("create dir {} failed", dir));
         return;
     }
 
     let crc = crc::Crc::<u32>::new(&crc::CRC_32_CD_ROM_EDC);
     let mut digest = crc.digest();
     digest.update(dex_data);
+    let file_name = format!("{}/{:08x}.dex", dir, digest.finalize());
 
-    let file_name = format!("/data/data/{}/dexes/{:08x}.dex", package, digest.finalize());
-    if let Err(e) = std::fs::write(file_name, dex_data) {
-        error!("write file error: {:?}", e);
+    match std::fs::write(&file_name, dex_data) {
+        Ok(_) => dbg_log(&format!("saved {} ({} bytes)", file_name, size)),
+        Err(e) => dbg_log(&format!("write {} failed: {:?}", file_name, e)),
     }
 }
 
-// =====================================================================
-// Hook RegisterNatives — chữ ký C chuẩn, dùng extern "C" bình thường
-// (không cần naked_asm vì đây không phải C++ method với ABI đặc biệt).
-//
-// jint RegisterNatives(JNIEnv *env, jclass clazz,
-//                       const JNINativeMethod *methods, jint nMethods);
-//
-// struct JNINativeMethod { const char* name; const char* signature; void* fnPtr; };
-// =====================================================================
+// =========================================================================
+// Hook JNI_OnLoad của libl5e5d2631.so — điểm lấy JNIEnv* để sau đó hook
+// RegisterNatives. Đây là điểm thay thế cho self.env vốn chỉ có sẵn qua
+// Zygisk API (giờ không dùng nữa).
+// =========================================================================
+fn try_hook_target_jni_onload() -> bool {
+    let addr = match dobby_rs::resolve_symbol("libl5e5d2631.so", "JNI_OnLoad") {
+        Some(a) => a,
+        None => return false, // lib chưa load, thử lại vòng poll sau
+    };
+
+    dbg_log(&format!("libl5e5d2631.so JNI_OnLoad addr: {:x}", addr as usize));
+    match unsafe { dobby_rs::hook(addr, new_target_jni_onload_wrapper as Address) } {
+        Ok(old) => {
+            OLD_TARGET_JNI_ONLOAD.store(old as usize, Ordering::SeqCst);
+            true
+        }
+        Err(e) => {
+            dbg_log(&format!("hook JNI_OnLoad failed: {:?}", e));
+            false
+        }
+    }
+}
+
+// JNI_OnLoad chữ ký chuẩn: jint JNI_OnLoad(JavaVM* vm, void* reserved)
+// Đây LÀ hàm C thường (extern "C"/"system", không phải C++ method), nên
+// KHÔNG cần naked_asm — dùng extern "system" bình thường là đủ.
+extern "system" fn new_target_jni_onload_wrapper(
+    vm: *mut jni_sys::JavaVM,
+    reserved: *mut std::os::raw::c_void,
+) -> jni_sys::jint {
+    dbg_log("target libl5e5d2631.so JNI_OnLoad CALLED — hooking RegisterNatives now");
+
+    // Lấy JNIEnv* từ JavaVM bằng GetEnv — cách chuẩn để có JNIEnv* hợp lệ
+    // tại đúng thread hiện tại.
+    unsafe {
+        let vm_functions = *vm;
+        if let Some(get_env) = (*vm_functions).GetEnv {
+            let mut env_ptr: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let jni_version = 0x00010006; // JNI_VERSION_1_6
+            let result = get_env(vm, &mut env_ptr, jni_version);
+
+            if result == 0 && !env_ptr.is_null() {
+                let env = env_ptr as *mut jni_sys::JNIEnv;
+                hook_register_natives(env);
+            } else {
+                dbg_log(&format!("GetEnv failed, result={}", result));
+            }
+        } else {
+            dbg_log("JavaVM.GetEnv function pointer is null");
+        }
+    }
+
+    // Gọi hàm gốc để JNI_OnLoad thật vẫn chạy bình thường — bắt buộc,
+    // nếu không app sẽ crash vì lib tưởng mình chưa init xong.
+    unsafe {
+        let orig: extern "system" fn(
+            *mut jni_sys::JavaVM,
+            *mut std::os::raw::c_void,
+        ) -> jni_sys::jint = std::mem::transmute(OLD_TARGET_JNI_ONLOAD.load(Ordering::SeqCst));
+        orig(vm, reserved)
+    }
+}
+
+unsafe fn hook_register_natives(env: *mut jni_sys::JNIEnv) {
+    let functions_ptr: *const jni_sys::JNINativeInterface_ = *env;
+    let register_natives_ptr = match (*functions_ptr).RegisterNatives {
+        Some(f) => f,
+        None => {
+            dbg_log("RegisterNatives function pointer is null");
+            return;
+        }
+    };
+
+    dbg_log(&format!("RegisterNatives original addr: {:x}", register_natives_ptr as usize));
+
+    match dobby_rs::hook(
+        register_natives_ptr as Address,
+        new_register_natives_wrapper as Address,
+    ) {
+        Ok(old) => {
+            OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
+            dbg_log("RegisterNatives hooked successfully");
+        }
+        Err(e) => {
+            dbg_log(&format!("hook RegisterNatives failed: {:?}", e));
+        }
+    }
+}
 
 #[repr(C)]
 struct JNINativeMethodRaw {
@@ -331,9 +346,6 @@ struct JNINativeMethodRaw {
     fn_ptr: *mut std::os::raw::c_void,
 }
 
-static TARGET_METHOD_ADDR: AtomicUsize = AtomicUsize::new(0);
-static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
-
 extern "system" fn new_register_natives_wrapper(
     env: *mut jni_sys::JNIEnv,
     clazz: jni_sys::jclass,
@@ -341,65 +353,41 @@ extern "system" fn new_register_natives_wrapper(
     n_methods: jni_sys::jint,
 ) -> jni_sys::jint {
     unsafe {
-        // Lấy tên class đang đăng ký native methods, để log cho biết
-        // ngữ cảnh (class nào gọi RegisterNatives) — hữu ích để xác nhận
-        // đúng đây là v5e5d2631/m5e5d2631 namespace trước khi đào sâu.
         let class_name = get_class_name_safe(env, clazz);
-        info!(
+        dbg_log(&format!(
             "RegisterNatives called: class={} n_methods={}",
             class_name, n_methods
-        );
+        ));
 
         for i in 0..n_methods as isize {
             let m = &*methods.offset(i);
-            let name = std::ffi::CStr::from_ptr(m.name)
-                .to_string_lossy()
-                .to_string();
-            let sig = std::ffi::CStr::from_ptr(m.signature)
-                .to_string_lossy()
-                .to_string();
+            let name = std::ffi::CStr::from_ptr(m.name).to_string_lossy().to_string();
+            let sig = std::ffi::CStr::from_ptr(m.signature).to_string_lossy().to_string();
 
-            info!(
+            dbg_log(&format!(
                 "  native method: {} sig={} fnPtr=0x{:x}",
                 name, sig, m.fn_ptr as usize
-            );
+            ));
 
-            // Mục tiêu chính: F5e5d2631_00 — dispatcher chung của toàn bộ
-            // method bị virtualize, xác nhận từ log crash trước đó nhận
-            // (int methodId, Object[] args).
-            if name == "F5e5d2631_00"
-                && TARGET_METHOD_ADDR.load(Ordering::SeqCst) == 0
-            {
+            if name == "F5e5d2631_00" && TARGET_METHOD_ADDR.load(Ordering::SeqCst) == 0 {
                 let fn_addr = m.fn_ptr as usize;
                 TARGET_METHOD_ADDR.store(fn_addr, Ordering::SeqCst);
-                info!(
+                dbg_log(&format!(
                     "!!! FOUND F5e5d2631_00 dispatcher @ 0x{:x}, class={} !!!",
                     fn_addr, class_name
-                );
+                ));
 
-                // Hook luôn ngay tại đây — dispatcher này nhận
-                // (JNIEnv*, jclass, jint methodId, jobjectArray args)
-                // theo chuẩn JNI static native method.
-                match dobby_rs::hook(
-                    fn_addr as Address,
-                    new_f5e5d2631_00_wrapper as Address,
-                ) {
+                match dobby_rs::hook(fn_addr as Address, new_f5e5d2631_00_wrapper as Address) {
                     Ok(old) => {
-                        let old_addr = old as usize;
-                        OLD_F5E5D2631_00.store(old_addr, Ordering::SeqCst);
-                        info!("F5e5d2631_00 hooked successfully, trampoline=0x{:x}", old_addr);
+                        OLD_F5E5D2631_00.store(old as usize, Ordering::SeqCst);
+                        dbg_log("F5e5d2631_00 hooked successfully");
                     }
-                    Err(e) => {
-                        error!("failed to hook F5e5d2631_00: {:?}", e);
-                    }
+                    Err(e) => dbg_log(&format!("failed to hook F5e5d2631_00: {:?}", e)),
                 }
             }
         }
     }
 
-    // Gọi hàm gốc để RegisterNatives vẫn hoạt động bình thường — KHÔNG
-    // được chặn lời gọi thật, nếu không app sẽ crash vì thiếu native
-    // method implementation.
     unsafe {
         let orig: extern "system" fn(
             *mut jni_sys::JNIEnv,
@@ -412,8 +400,6 @@ extern "system" fn new_register_natives_wrapper(
 }
 
 unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass) -> String {
-    // env: *mut JNIEnv == *mut *const JNINativeInterface_ (chuẩn JNI).
-    // Deref 1 lần để lấy con trỏ tới bảng hàm thật.
     let functions: *const jni_sys::JNINativeInterface_ = *env;
     let get_object_class = match (*functions).GetObjectClass {
         Some(f) => f,
@@ -421,9 +407,6 @@ unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass)
     };
     let class_of_class = get_object_class(env, clazz as jni_sys::jobject);
 
-    // Gọi java.lang.Class#getName() qua JNI thủ công để lấy tên dạng
-    // "a.b.C" (không dùng crate jni cấp cao để giảm rủi ro panic ở
-    // native callback — 1 panic ở đây có thể crash toàn bộ app).
     let find_class = match (*functions).FindClass {
         Some(f) => f,
         None => return "?".to_string(),
@@ -465,33 +448,20 @@ unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass)
         return "?".to_string();
     }
 
-    let result = std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string();
-    result
+    std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
 }
 
-// =====================================================================
-// Hook cho chính F5e5d2631_00 — dispatcher static native, chữ ký xác
-// nhận từ log crash: void F5e5d2631_00(int methodId, Object[] args)
-// Vì là STATIC method, tham số JNI thật sự nhận vào là:
-//   (JNIEnv*, jclass, jint methodId, jobjectArray args)
-// "Object[]" trong Java tương ứng jobjectArray ở tầng JNI, không phải
-// jobject đơn — quan trọng để đọc đúng args nếu cần mở rộng sau này.
-// =====================================================================
 extern "system" fn new_f5e5d2631_00_wrapper(
     env: *mut jni_sys::JNIEnv,
     clazz: jni_sys::jclass,
     method_id: jni_sys::jint,
     args: jni_sys::jobjectArray,
 ) {
-    info!(
-        "F5e5d2631_00 CALLED: methodId={} (0x{:x}) args_ptr=0x{:x}",
-        method_id, method_id, args as usize
-    );
+    dbg_log(&format!(
+        "F5e5d2631_00 CALLED: methodId={} args_ptr=0x{:x}",
+        method_id, args as usize
+    ));
 
-    // Log ra file riêng để dễ đối chiếu theo thời gian, vì logcat có thể
-    // bị rotate/mất nếu app chạy lâu. Đồng thời log luôn độ dài mảng
-    // args (nếu đọc được) để biết mỗi methodId truyền vào bao nhiêu
-    // tham số — hữu ích khi đối chiếu ngược với DEX đã dump được.
     unsafe {
         let array_len = if !args.is_null() {
             let functions: *const jni_sys::JNINativeInterface_ = *env;
@@ -508,21 +478,13 @@ extern "system" fn new_f5e5d2631_00_wrapper(
                 let dir = format!("/data/data/{}/dexes", package);
                 let _ = std::fs::create_dir_all(&dir);
                 let log_path = format!("{}/method_calls.log", dir);
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log_path)
-                {
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
                     use std::io::Write;
                     let ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    let _ = writeln!(
-                        f,
-                        "[{}] methodId={} args_ptr=0x{:x} args_len={}",
-                        ts, method_id, args as usize, array_len
-                    );
+                    let _ = writeln!(f, "[{}] methodId={} args_len={}", ts, method_id, array_len);
                 }
             }
         }
