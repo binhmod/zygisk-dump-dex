@@ -226,8 +226,6 @@ pub extern "C" fn new_open_common_wrapper() {
         stp x6, x7, [sp, #0x40]
         stp x8, x9, [sp, #0x50]
 
-        mov x0, x1
-        mov x1, x2
         bl {new_open_common}
 
         ldp x29, x30, [sp, #0]
@@ -246,11 +244,10 @@ pub extern "C" fn new_open_common_wrapper() {
     );
 }
 
-// Wrapper thứ 2, dành riêng cho ArtDexFileLoader::OpenCommon. Chữ ký
-// tham số giống hệt DexFileLoader::OpenCommon (đã xác nhận qua `nm -D`
-// trên thiết bị: cùng PKhm... ở đầu), nên dùng lại chung hàm xử lý
-// new_open_common ở Rust, chỉ khác trampoline quay lại (OLD_ART_OPEN_COMMON
-// thay vì OLD_OPEN_COMMON) vì đây là 2 hàm gốc khác nhau trong binary.
+// Wrapper thứ 2, dành riêng cho ArtDexFileLoader::OpenCommon. Đã xác
+// nhận qua ART source code thật (art_dex_file_loader.h) rằng đây CŨNG
+// LÀ STATIC METHOD giống DexFileLoader::OpenCommon — không có `this`
+// pointer ẩn, x0 vốn đã là `base` thật, không cần dịch chuyển thanh ghi.
 #[unsafe(naked)]
 pub extern "C" fn new_art_open_common_wrapper() {
     naked_asm!(
@@ -263,8 +260,6 @@ pub extern "C" fn new_art_open_common_wrapper() {
         stp x6, x7, [sp, #0x40]
         stp x8, x9, [sp, #0x50]
 
-        mov x0, x1
-        mov x1, x2
         bl {new_open_common}
 
         ldp x29, x30, [sp, #0]
