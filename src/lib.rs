@@ -27,7 +27,7 @@
 
 use ctor::ctor;
 use dobby_rs::Address;
-use log::{error, info};
+use log::info;
 
 // =========================================================================
 // CUSTOM SYMBOL RESOLVER
