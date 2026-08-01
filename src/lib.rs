@@ -67,23 +67,32 @@ fn init() {
     info!("=== dump_dex payload init (via #[ctor]) ===");
     dbg_log("android_logger init_once completed");
 
-    // QUAN TRỌNG: bỏ chiến lược cũ "hook JNI_OnLoad của libl5e5d2631.so để
-    // lấy JNIEnv*" — có lỗ hổng logic: nếu #[ctor] chạy SAU thời điểm
-    // System.loadLibrary() đã gọi xong JNI_OnLoad thật (rất có thể xảy ra
-    // vì #[ctor] của payload phụ thuộc lúc Zygisk-Loader inject, không
-    // đảm bảo sớm hơn lúc app tự load lib đích), thì JNI_OnLoad sẽ KHÔNG
-    // BAO GIỜ được gọi lại — hook đặt ra vô nghĩa, watcher poll vô ích.
+    // QUAN TRỌNG — SỬA LẦN 2: log tombstone trước cho thấy crash xảy ra
+    // ngay trong watcher thread (#06 pc ... __pthread_start), rất có thể
+    // do RACE CONDITION — main thread của app đang THỰC THI CHÍNH
+    // RegisterNatives cùng lúc watcher thread cố GHI TRAMPOLINE đè lên
+    // đúng vùng code đó (dobby_rs::hook làm inline patch, không an toàn
+    // nếu có thread khác đang chạy ngay tại địa chỉ bị patch).
     //
-    // Chiến lược mới: hook THẲNG RegisterNatives trong libart.so bằng
-    // dobby_rs::resolve_symbol theo TÊN HÀM CHUẨN (không cần JNIEnv* nào
-    // cả để đặt hook — chỉ cần symbol export của chính libart.so, luôn
-    // sẵn có ngay khi ART runtime khởi động, không phụ thuộc app cụ thể
-    // nào đã gọi RegisterNatives hay chưa).
+    // Cách sửa: hook RegisterNatives NGAY TẠI ĐÂY, đồng bộ, trong chính
+    // luồng thực thi của #[ctor] — đây là thời điểm sớm nhất có thể,
+    // trước khi bất kỳ code Java nào của app kịp chạy (vì #[ctor] chạy
+    // ngay lúc dlopen(), trước cả khi control quay lại cho code gọi
+    // dlopen). Giảm mạnh cửa sổ race condition so với đợi thread riêng.
+    dbg_log("attempting SYNCHRONOUS hook of RegisterNatives right in ctor (before spawning watcher thread)");
+    if try_hook_register_natives_direct() {
+        JNI_ONLOAD_HOOKED.store(1, Ordering::SeqCst);
+        dbg_log("RegisterNatives hooked SYNCHRONOUSLY in ctor — success");
+    } else {
+        dbg_log("libart.so chưa sẵn sàng lúc ctor chạy, sẽ retry qua watcher thread");
+    }
+
+    // OpenCommon vẫn cần chờ (libdexfile.so có thể chưa load lúc ctor
+    // chạy quá sớm), giữ nguyên watcher thread cho phần này.
     std::thread::spawn(|| {
-        dbg_log("watcher thread started, polling for libdexfile.so + libart.so RegisterNatives");
+        dbg_log("watcher thread started, polling for libdexfile.so + retry RegisterNatives if needed");
 
         for i in 0..300 {
-            // tăng lên 300 * 100ms = 30s, đủ thời gian dư dả hơn
             std::thread::sleep(std::time::Duration::from_millis(100));
 
             if OPEN_COMMON_HOOKED.load(Ordering::SeqCst) == 0 {
@@ -94,11 +103,15 @@ fn init() {
                 }
             }
 
+            // Retry RegisterNatives CHỈ NẾU chưa hook được đồng bộ ở trên
+            // (trường hợp libart.so chưa sẵn sàng lúc ctor chạy quá sớm).
+            // Đây vẫn có rủi ro race condition như bản cũ, nhưng chỉ là
+            // fallback hiếm khi cần tới.
             if JNI_ONLOAD_HOOKED.load(Ordering::SeqCst) == 0 {
-                dbg_log(&format!("poll #{}: trying try_hook_register_natives_direct()", i));
+                dbg_log(&format!("poll #{}: retry try_hook_register_natives_direct()", i));
                 if try_hook_register_natives_direct() {
                     JNI_ONLOAD_HOOKED.store(1, Ordering::SeqCst);
-                    dbg_log("RegisterNatives (direct via libart.so) hook installed successfully");
+                    dbg_log("RegisterNatives hooked via watcher thread retry — success");
                 }
             }
 
