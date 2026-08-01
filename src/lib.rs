@@ -27,7 +27,7 @@
 
 use ctor::ctor;
 use dobby_rs::Address;
-use log::info;
+use log::{error, info};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::arch::naked_asm;
 
@@ -67,29 +67,38 @@ fn init() {
     info!("=== dump_dex payload init (via #[ctor]) ===");
     dbg_log("android_logger init_once completed");
 
-    // Vì #[ctor] chạy RẤT SỚM (ngay khi thư viện được nạp), có thể trước
-    // cả khi libl5e5d2631.so đã load xong (nếu Zygisk-Loader inject sớm
-    // hơn lúc app tự System.load() thư viện đó). Cần đợi + poll cho tới
-    // khi libl5e5d2631.so xuất hiện trong tiến trình rồi mới hook.
+    // QUAN TRỌNG: bỏ chiến lược cũ "hook JNI_OnLoad của libl5e5d2631.so để
+    // lấy JNIEnv*" — có lỗ hổng logic: nếu #[ctor] chạy SAU thời điểm
+    // System.loadLibrary() đã gọi xong JNI_OnLoad thật (rất có thể xảy ra
+    // vì #[ctor] của payload phụ thuộc lúc Zygisk-Loader inject, không
+    // đảm bảo sớm hơn lúc app tự load lib đích), thì JNI_OnLoad sẽ KHÔNG
+    // BAO GIỜ được gọi lại — hook đặt ra vô nghĩa, watcher poll vô ích.
+    //
+    // Chiến lược mới: hook THẲNG RegisterNatives trong libart.so bằng
+    // dobby_rs::resolve_symbol theo TÊN HÀM CHUẨN (không cần JNIEnv* nào
+    // cả để đặt hook — chỉ cần symbol export của chính libart.so, luôn
+    // sẵn có ngay khi ART runtime khởi động, không phụ thuộc app cụ thể
+    // nào đã gọi RegisterNatives hay chưa).
     std::thread::spawn(|| {
-        dbg_log("watcher thread started, polling for libl5e5d2631.so + libdexfile.so");
+        dbg_log("watcher thread started, polling for libdexfile.so + libart.so RegisterNatives");
 
-        for i in 0..100 {
+        for i in 0..300 {
+            // tăng lên 300 * 100ms = 30s, đủ thời gian dư dả hơn
             std::thread::sleep(std::time::Duration::from_millis(100));
 
-            // --- Hook OpenCommon (libdexfile.so) — chỉ làm 1 lần ---
             if OPEN_COMMON_HOOKED.load(Ordering::SeqCst) == 0 {
+                dbg_log(&format!("poll #{}: trying try_hook_open_common()", i));
                 if try_hook_open_common() {
                     OPEN_COMMON_HOOKED.store(1, Ordering::SeqCst);
                     dbg_log("OpenCommon hooks installed successfully");
                 }
             }
 
-            // --- Hook JNI_OnLoad của libl5e5d2631.so — chỉ làm 1 lần ---
             if JNI_ONLOAD_HOOKED.load(Ordering::SeqCst) == 0 {
-                if try_hook_target_jni_onload() {
+                dbg_log(&format!("poll #{}: trying try_hook_register_natives_direct()", i));
+                if try_hook_register_natives_direct() {
                     JNI_ONLOAD_HOOKED.store(1, Ordering::SeqCst);
-                    dbg_log("target JNI_OnLoad hook installed successfully");
+                    dbg_log("RegisterNatives (direct via libart.so) hook installed successfully");
                 }
             }
 
@@ -100,7 +109,7 @@ fn init() {
                 return;
             }
         }
-        dbg_log("watcher thread gave up after 100 polls (10s), some hooks may be missing");
+        dbg_log("watcher thread gave up after 300 polls (30s), some hooks may be missing");
     });
 }
 
@@ -108,7 +117,6 @@ static OPEN_COMMON_HOOKED: AtomicUsize = AtomicUsize::new(0);
 static JNI_ONLOAD_HOOKED: AtomicUsize = AtomicUsize::new(0);
 static OLD_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
 static OLD_ART_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
-static OLD_TARGET_JNI_ONLOAD: AtomicUsize = AtomicUsize::new(0);
 static OLD_REGISTER_NATIVES: AtomicUsize = AtomicUsize::new(0);
 static TARGET_METHOD_ADDR: AtomicUsize = AtomicUsize::new(0);
 static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
@@ -250,91 +258,45 @@ extern "C" fn new_open_common(base: usize, size: usize) {
 }
 
 // =========================================================================
-// Hook JNI_OnLoad của libl5e5d2631.so — điểm lấy JNIEnv* để sau đó hook
-// RegisterNatives. Đây là điểm thay thế cho self.env vốn chỉ có sẵn qua
-// Zygisk API (giờ không dùng nữa).
+// Hook TRỰC TIẾP art::JNI::RegisterNatives trong libart.so.
+//
+// LÝ DO ĐỔI CHIẾN LƯỢC: cách cũ (hook JNI_OnLoad của libl5e5d2631.so rồi
+// mới lấy JNIEnv* để hook RegisterNatives) có lỗ hổng logic nghiêm trọng
+// — nếu #[ctor] của payload chạy SAU thời điểm app đã tự gọi
+// System.loadLibrary() xong (rất có thể xảy ra, vì #[ctor] phụ thuộc lúc
+// Zygisk-Loader inject, không đảm bảo sớm hơn app tự load lib đích), thì
+// JNI_OnLoad thật đã chạy và kết thúc từ trước — hook đặt vào lúc đó sẽ
+// KHÔNG BAO GIỜ được gọi lại, khiến toàn bộ watcher poll vô ích.
+//
+// Cách mới: hook thẳng symbol implementation thật của RegisterNatives
+// bên trong libart.so — _ZN3art3JNI15RegisterNativesEP7_JNIEnvP7_jclass
+// PK15JNINativeMethodi (art::JNI::RegisterNatives). Đây là hàm DUY NHẤT
+// mọi RegisterNatives() call (từ BẤT KỲ lib nào, BẤT KỲ lúc nào) đều đi
+// qua — libart.so luôn có sẵn ngay từ khi ART runtime khởi động, không
+// phụ thuộc app cụ thể đã gọi gì hay chưa tại thời điểm hook được đặt.
 // =========================================================================
-fn try_hook_target_jni_onload() -> bool {
-    let addr = match dobby_rs::resolve_symbol("libl5e5d2631.so", "JNI_OnLoad") {
+fn try_hook_register_natives_direct() -> bool {
+    let addr = match dobby_rs::resolve_symbol(
+        "libart.so",
+        "_ZN3art3JNI15RegisterNativesEP7_JNIEnvP7_jclassPK15JNINativeMethodi",
+    ) {
         Some(a) => a,
-        None => return false, // lib chưa load, thử lại vòng poll sau
+        None => {
+            dbg_log("resolve_symbol art::JNI::RegisterNatives in libart.so -> None (chưa load hoặc symbol khác tên trên Android version này)");
+            return false;
+        }
     };
 
-    dbg_log(&format!("libl5e5d2631.so JNI_OnLoad addr: {:x}", addr as usize));
-    match unsafe { dobby_rs::hook(addr, new_target_jni_onload_wrapper as Address) } {
+    dbg_log(&format!("art::JNI::RegisterNatives addr: {:x}", addr as usize));
+    match unsafe { dobby_rs::hook(addr, new_register_natives_wrapper as Address) } {
         Ok(old) => {
-            OLD_TARGET_JNI_ONLOAD.store(old as usize, Ordering::SeqCst);
+            OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
+            dbg_log("art::JNI::RegisterNatives hooked successfully");
             true
         }
         Err(e) => {
-            dbg_log(&format!("hook JNI_OnLoad failed: {:?}", e));
+            dbg_log(&format!("hook art::JNI::RegisterNatives failed: {:?}", e));
             false
-        }
-    }
-}
-
-// JNI_OnLoad chữ ký chuẩn: jint JNI_OnLoad(JavaVM* vm, void* reserved)
-// Đây LÀ hàm C thường (extern "C"/"system", không phải C++ method), nên
-// KHÔNG cần naked_asm — dùng extern "system" bình thường là đủ.
-extern "system" fn new_target_jni_onload_wrapper(
-    vm: *mut jni_sys::JavaVM,
-    reserved: *mut std::os::raw::c_void,
-) -> jni_sys::jint {
-    dbg_log("target libl5e5d2631.so JNI_OnLoad CALLED — hooking RegisterNatives now");
-
-    // Lấy JNIEnv* từ JavaVM bằng GetEnv — cách chuẩn để có JNIEnv* hợp lệ
-    // tại đúng thread hiện tại.
-    unsafe {
-        let vm_functions = *vm;
-        if let Some(get_env) = (*vm_functions).GetEnv {
-            let mut env_ptr: *mut std::os::raw::c_void = std::ptr::null_mut();
-            let jni_version = 0x00010006; // JNI_VERSION_1_6
-            let result = get_env(vm, &mut env_ptr, jni_version);
-
-            if result == 0 && !env_ptr.is_null() {
-                let env = env_ptr as *mut jni_sys::JNIEnv;
-                hook_register_natives(env);
-            } else {
-                dbg_log(&format!("GetEnv failed, result={}", result));
-            }
-        } else {
-            dbg_log("JavaVM.GetEnv function pointer is null");
-        }
-    }
-
-    // Gọi hàm gốc để JNI_OnLoad thật vẫn chạy bình thường — bắt buộc,
-    // nếu không app sẽ crash vì lib tưởng mình chưa init xong.
-    unsafe {
-        let orig: extern "system" fn(
-            *mut jni_sys::JavaVM,
-            *mut std::os::raw::c_void,
-        ) -> jni_sys::jint = std::mem::transmute(OLD_TARGET_JNI_ONLOAD.load(Ordering::SeqCst));
-        orig(vm, reserved)
-    }
-}
-
-unsafe fn hook_register_natives(env: *mut jni_sys::JNIEnv) {
-    let functions_ptr: *const jni_sys::JNINativeInterface_ = *env;
-    let register_natives_ptr = match (*functions_ptr).RegisterNatives {
-        Some(f) => f,
-        None => {
-            dbg_log("RegisterNatives function pointer is null");
-            return;
-        }
-    };
-
-    dbg_log(&format!("RegisterNatives original addr: {:x}", register_natives_ptr as usize));
-
-    match dobby_rs::hook(
-        register_natives_ptr as Address,
-        new_register_natives_wrapper as Address,
-    ) {
-        Ok(old) => {
-            OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
-            dbg_log("RegisterNatives hooked successfully");
-        }
-        Err(e) => {
-            dbg_log(&format!("hook RegisterNatives failed: {:?}", e));
         }
     }
 }
