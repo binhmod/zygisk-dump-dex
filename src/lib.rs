@@ -27,7 +27,7 @@
 
 use ctor::ctor;
 use dobby_rs::Address;
-use log::{error, info};
+use log::info;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::arch::naked_asm;
 
