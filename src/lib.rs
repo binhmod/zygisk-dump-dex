@@ -28,6 +28,178 @@
 use ctor::ctor;
 use dobby_rs::Address;
 use log::info;
+
+// =========================================================================
+// CUSTOM SYMBOL RESOLVER
+// -----------------------------------------------------------------------
+// LÝ DO CẦN THAY THẾ dobby_rs::resolve_symbol(): tombstone log xác nhận
+// dobby's symbol resolver tự động quét TOÀN BỘ module đã load trong tiến
+// trình, kể cả memfd của chính payload này ("/memfd:zygisk-payload
+// (deleted)") — vì memfd đã bị unlink khỏi filesystem (đặc tính kỹ thuật
+// injection của Zygisk-Loader), việc dobby cố file_mmap() nó thất bại,
+// và có vẻ dẫn tới SEGV ngay sau đó (crash xảy ra đúng lúc đang resolve).
+//
+// Giải pháp: tự viết resolver tối giản, CHỈ xử lý đúng 1 module cần
+// (libart.so) — đọc base address thật từ /proc/self/maps (không quét
+// toàn bộ), rồi đọc offset symbol từ chính file .so đó trên đĩa qua ELF
+// dynamic symbol table (.dynsym + .dynstr), không đụng tới memfd nào cả.
+// =========================================================================
+mod resolver {
+    use std::fs;
+    use std::io::Read;
+
+    /// Tìm base address thật (nơi bắt đầu vùng nhớ executable) của 1 module
+    /// theo tên, bằng cách đọc /proc/self/maps. Trả về (base_address, đường
+    /// dẫn file thật trên đĩa) để dùng tiếp cho việc đọc ELF.
+    pub fn find_module_base(module_name: &str) -> Option<(usize, String)> {
+        let maps = fs::read_to_string("/proc/self/maps").ok()?;
+
+        for line in maps.lines() {
+            if !line.contains(module_name) {
+                continue;
+            }
+            // Format dòng /proc/self/maps:
+            // 7b0f...000-7b0f...000 r-xp 00000000 fd:03 1234  /path/to/lib.so
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 6 {
+                continue;
+            }
+            let addr_range = parts[0];
+            let path = parts[5];
+
+            // Chỉ lấy dòng đầu tiên khớp — thường đây là base address thật
+            // (offset trong file = 0, vùng đầu tiên được map).
+            let offset_in_file = parts[2];
+            if offset_in_file != "00000000" {
+                continue;
+            }
+
+            let start_str = addr_range.split('-').next()?;
+            let base = usize::from_str_radix(start_str, 16).ok()?;
+
+            return Some((base, path.to_string()));
+        }
+        None
+    }
+
+    /// Đọc ELF dynamic symbol table (.dynsym + .dynstr) từ file thật trên
+    /// đĩa để tìm OFFSET (không phải địa chỉ tuyệt đối) của 1 symbol theo
+    /// tên chính xác. Đây là parser ELF64 tối giản, chỉ đủ dùng cho mục
+    /// đích này — không cần crate ngoài (goblin/object) để giảm phụ thuộc.
+    pub fn find_symbol_offset(file_path: &str, symbol_name: &str) -> Option<usize> {
+        let mut file = fs::File::open(file_path).ok()?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).ok()?;
+
+        if data.len() < 64 || &data[0..4] != b"\x7fELF" {
+            return None;
+        }
+        let is_64bit = data[4] == 2;
+        if !is_64bit {
+            return None; // chỉ hỗ trợ ELF64 (arm64-v8a luôn là 64-bit)
+        }
+
+        // ELF64 header offsets (theo chuẩn ELF spec):
+        // e_shoff (section header offset): byte 0x28, 8 bytes
+        // e_shentsize: byte 0x3A, 2 bytes
+        // e_shnum: byte 0x3C, 2 bytes
+        // e_shstrndx: byte 0x3E, 2 bytes
+        let e_shoff = read_u64(&data, 0x28)?;
+        let e_shentsize = read_u16(&data, 0x3A)? as usize;
+        let e_shnum = read_u16(&data, 0x3C)? as usize;
+        let e_shstrndx = read_u16(&data, 0x3E)? as usize;
+
+        if e_shoff == 0 || e_shnum == 0 {
+            return None;
+        }
+
+        // Đọc section header string table (để biết tên từng section).
+        let shstrtab_hdr_off = e_shoff as usize + e_shstrndx * e_shentsize;
+        let shstrtab_offset = read_u64(&data, shstrtab_hdr_off + 0x18)? as usize;
+
+        let mut dynsym_offset = 0usize;
+        let mut dynsym_size = 0usize;
+        let mut dynsym_entsize = 0usize;
+        let mut dynstr_offset = 0usize;
+
+        for i in 0..e_shnum {
+            let sh_off = e_shoff as usize + i * e_shentsize;
+            let name_idx = read_u32(&data, sh_off)? as usize;
+            let sh_type = read_u32(&data, sh_off + 4)?;
+            let sh_offset = read_u64(&data, sh_off + 0x18)? as usize;
+            let sh_size = read_u64(&data, sh_off + 0x20)? as usize;
+            let sh_entsize = read_u64(&data, sh_off + 0x38)? as usize;
+
+            let name = read_cstr(&data, shstrtab_offset + name_idx)?;
+
+            // SHT_DYNSYM = 11, SHT_STRTAB = 3 (nhưng cần đúng .dynstr,
+            // không phải .strtab thường — phân biệt qua tên section).
+            if sh_type == 11 && name == ".dynsym" {
+                dynsym_offset = sh_offset;
+                dynsym_size = sh_size;
+                dynsym_entsize = sh_entsize;
+            } else if name == ".dynstr" {
+                dynstr_offset = sh_offset;
+            }
+        }
+
+        if dynsym_offset == 0 || dynsym_entsize == 0 || dynstr_offset == 0 {
+            return None;
+        }
+
+        let num_symbols = dynsym_size / dynsym_entsize;
+
+        // Elf64_Sym layout: st_name(4) st_info(1) st_other(1) st_shndx(2)
+        //                    st_value(8) st_size(8)  = 24 bytes total
+        for i in 0..num_symbols {
+            let sym_off = dynsym_offset + i * dynsym_entsize;
+            let st_name_idx = read_u32(&data, sym_off)? as usize;
+            let st_value = read_u64(&data, sym_off + 8)? as usize;
+
+            if st_value == 0 {
+                continue; // symbol undefined/không có địa chỉ, bỏ qua
+            }
+
+            let name = read_cstr(&data, dynstr_offset + st_name_idx)?;
+            if name == symbol_name {
+                return Some(st_value);
+            }
+        }
+
+        None
+    }
+
+    /// Kết hợp 2 hàm trên: tìm địa chỉ TUYỆT ĐỐI trong bộ nhớ của 1 symbol
+    /// trong 1 module đang chạy, không dùng dobby's resolver.
+    pub fn resolve_symbol_safe(module_name: &str, symbol_name: &str) -> Option<usize> {
+        let (base, path) = find_module_base(module_name)?;
+        let offset = find_symbol_offset(&path, symbol_name)?;
+        Some(base + offset)
+    }
+
+    fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
+        data.get(offset..offset + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
+        data.get(offset..offset + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn read_u64(data: &[u8], offset: usize) -> Option<u64> {
+        data.get(offset..offset + 8).map(|b| {
+            u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]])
+        })
+    }
+
+    fn read_cstr(data: &[u8], offset: usize) -> Option<String> {
+        let slice = data.get(offset..)?;
+        let end = slice.iter().position(|&b| b == 0)?;
+        String::from_utf8(slice[..end].to_vec()).ok()
+    }
+}
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::arch::naked_asm;
 
@@ -139,16 +311,16 @@ static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
 // STATIC method, x0 = base thật, không cần dịch thanh ghi).
 // =========================================================================
 fn try_hook_open_common() -> bool {
-    let open_common = match dobby_rs::resolve_symbol(
+    let open_common_addr = match resolver::resolve_symbol_safe(
         "libdexfile.so",
         "_ZN3art13DexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS0_12VerifyResultE",
     ) {
         Some(addr) => addr,
-        None => return false, // libdexfile.so chưa load, thử lại ở vòng poll sau
+        None => return false, // libdexfile.so chưa load hoặc symbol không tìm thấy, thử lại ở vòng poll sau
     };
 
-    dbg_log(&format!("DexFileLoader::OpenCommon addr: {:x}", open_common as usize));
-    match unsafe { dobby_rs::hook(open_common, new_open_common_wrapper as Address) } {
+    dbg_log(&format!("DexFileLoader::OpenCommon addr: {:x}", open_common_addr));
+    match unsafe { dobby_rs::hook(open_common_addr as Address, new_open_common_wrapper as Address) } {
         Ok(old) => OLD_OPEN_COMMON.store(old as usize, Ordering::SeqCst),
         Err(e) => {
             dbg_log(&format!("hook DexFileLoader::OpenCommon failed: {:?}", e));
@@ -156,12 +328,12 @@ fn try_hook_open_common() -> bool {
         }
     }
 
-    if let Some(addr) = dobby_rs::resolve_symbol(
+    if let Some(addr) = resolver::resolve_symbol_safe(
         "libdexfile.so",
         "_ZN3art16ArtDexFileLoader10OpenCommonEPKhmS2_mRKNSt3__112basic_stringIcNS3_11char_traitsIcEENS3_9allocatorIcEEEEjPKNS_10OatDexFileEbbPS9_NS3_10unique_ptrINS_16DexFileContainerENS3_14default_deleteISH_EEEEPNS_13DexFileLoader12VerifyResultE",
     ) {
-        dbg_log(&format!("ArtDexFileLoader::OpenCommon addr: {:x}", addr as usize));
-        match unsafe { dobby_rs::hook(addr, new_art_open_common_wrapper as Address) } {
+        dbg_log(&format!("ArtDexFileLoader::OpenCommon addr: {:x}", addr));
+        match unsafe { dobby_rs::hook(addr as Address, new_art_open_common_wrapper as Address) } {
             Ok(old) => OLD_ART_OPEN_COMMON.store(old as usize, Ordering::SeqCst),
             Err(e) => dbg_log(&format!("hook ArtDexFileLoader::OpenCommon failed: {:?}", e)),
         }
@@ -289,19 +461,19 @@ extern "C" fn new_open_common(base: usize, size: usize) {
 // phụ thuộc app cụ thể đã gọi gì hay chưa tại thời điểm hook được đặt.
 // =========================================================================
 fn try_hook_register_natives_direct() -> bool {
-    let addr = match dobby_rs::resolve_symbol(
+    let addr = match resolver::resolve_symbol_safe(
         "libart.so",
         "_ZN3art3JNI15RegisterNativesEP7_JNIEnvP7_jclassPK15JNINativeMethodi",
     ) {
         Some(a) => a,
         None => {
-            dbg_log("resolve_symbol art::JNI::RegisterNatives in libart.so -> None (chưa load hoặc symbol khác tên trên Android version này)");
+            dbg_log("resolve_symbol_safe art::JNI::RegisterNatives in libart.so -> None (chưa load hoặc symbol khác tên trên Android version này)");
             return false;
         }
     };
 
-    dbg_log(&format!("art::JNI::RegisterNatives addr: {:x}", addr as usize));
-    match unsafe { dobby_rs::hook(addr, new_register_natives_wrapper as Address) } {
+    dbg_log(&format!("art::JNI::RegisterNatives addr: {:x}", addr));
+    match unsafe { dobby_rs::hook(addr as Address, new_register_natives_wrapper as Address) } {
         Ok(old) => {
             OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
             dbg_log("art::JNI::RegisterNatives hooked successfully");
