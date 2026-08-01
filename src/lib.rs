@@ -27,7 +27,7 @@
 
 use ctor::ctor;
 use dobby_rs::Address;
-use log::info;
+use log::{error, info};
 
 // =========================================================================
 // CUSTOM SYMBOL RESOLVER
@@ -207,16 +207,31 @@ fn dbg_log(msg: &str) {
     // Ghi thẳng ra file, KHÔNG qua log/android_logger — dùng làm lớp bảo
     // hiểm cuối cùng để biết chắc code có chạy tới đâu, kể cả khi
     // android_logger có vấn đề (giữ nguyên chiến lược debug đã dùng).
+    //
+    // ĐÃ SỬA: đổi từ /data/local/tmp/ sang /data/data/<package>/files/ —
+    // đường dẫn cũ có thể bị SELinux/quyền UID chặn ghi từ context của
+    // app process (chỉ shell/root ghi thoải mái vào /data/local/tmp),
+    // khiến TOÀN BỘ debug log bị nuốt mất trong im lặng dù logcat vẫn
+    // hoạt động bình thường (log crate không phụ thuộc quyền file hệ
+    // thống theo cách này). Thư mục riêng của app luôn ghi được từ chính
+    // process của app đó.
     if let Ok(pkg) = std::fs::read_to_string("/proc/self/cmdline") {
         let pkg = pkg.split('\0').next().unwrap_or("unknown").to_string();
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
+
+        let log_path = format!("/data/data/{}/files/dump_dex_debug.log", pkg);
+
+        // Đảm bảo thư mục files/ tồn tại trước khi ghi (thường đã có sẵn
+        // do chính app tạo ra, nhưng tạo phòng hờ không thừa).
+        let _ = std::fs::create_dir_all(format!("/data/data/{}/files", pkg));
+
         let _ = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open("/data/local/tmp/dump_dex_debug.log")
+            .open(&log_path)
             .and_then(|mut f| {
                 use std::io::Write;
                 writeln!(f, "[{}] pid={} pkg={} {}", ts, std::process::id(), pkg, msg)
