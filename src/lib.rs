@@ -460,45 +460,135 @@ extern "C" fn new_open_common(base: usize, size: usize) {
 }
 
 // =========================================================================
-// Hook TRỰC TIẾP art::JNI::RegisterNatives trong libart.so.
+// Hook RegisterNatives qua JNIEnv function table (KHÔNG tìm symbol tĩnh).
 //
-// LÝ DO ĐỔI CHIẾN LƯỢC: cách cũ (hook JNI_OnLoad của libl5e5d2631.so rồi
-// mới lấy JNIEnv* để hook RegisterNatives) có lỗ hổng logic nghiêm trọng
-// — nếu #[ctor] của payload chạy SAU thời điểm app đã tự gọi
-// System.loadLibrary() xong (rất có thể xảy ra, vì #[ctor] phụ thuộc lúc
-// Zygisk-Loader inject, không đảm bảo sớm hơn app tự load lib đích), thì
-// JNI_OnLoad thật đã chạy và kết thúc từ trước — hook đặt vào lúc đó sẽ
-// KHÔNG BAO GIỜ được gọi lại, khiến toàn bộ watcher poll vô ích.
+// LÝ DO ĐỔI CHIẾN LƯỢC LẦN 2: `nm -D` xác nhận trên chính thiết bị này,
+// KHÔNG có bất kỳ symbol nào tên "RegisterNatives" trong .dynsym của
+// libart.so (đã quét toàn bộ output, kể cả các dạng UnstartedJNI*, JNI_*
+// khác — không có cái nào khớp). Rất có thể ART build này đã inline
+// RegisterNatives vào chỗ khác không export ra ngoài, hoặc đặt tên hoàn
+// toàn khác không đoán được.
 //
-// Cách mới: hook thẳng symbol implementation thật của RegisterNatives
-// bên trong libart.so — _ZN3art3JNI15RegisterNativesEP7_JNIEnvP7_jclass
-// PK15JNINativeMethodi (art::JNI::RegisterNatives). Đây là hàm DUY NHẤT
-// mọi RegisterNatives() call (từ BẤT KỲ lib nào, BẤT KỲ lúc nào) đều đi
-// qua — libart.so luôn có sẵn ngay từ khi ART runtime khởi động, không
-// phụ thuộc app cụ thể đã gọi gì hay chưa tại thời điểm hook được đặt.
+// Cách mới, không cần tìm tên symbol nào cả: dùng JNI_GetCreatedJavaVMs
+// (hàm NÀY CÓ THẬT — xác nhận qua nm -D: dòng "T JNI_GetCreatedJavaVMs")
+// để lấy JavaVM* toàn cục của tiến trình, rồi GetEnv() lấy JNIEnv* của
+// thread hiện tại. JNIEnv* trỏ tới 1 struct function table được ART tự
+// CẤP PHÁT RUNTIME (không phải symbol tĩnh trong file .so) — con trỏ
+// RegisterNatives nằm sẵn trong struct đó, đọc trực tiếp được, không
+// cần biết tên mangled hay tìm trong .dynsym.
 // =========================================================================
 fn try_hook_register_natives_direct() -> bool {
-    let addr = match resolver::resolve_symbol_safe(
-        "libart.so",
-        "_ZN3art3JNI15RegisterNativesEP7_JNIEnvP7_jclassPK15JNINativeMethodi",
-    ) {
+    // Bước 1: tìm JNI_GetCreatedJavaVMs — hàm CÓ THẬT, export chuẩn C
+    // (không mangled vì khai báo extern "C" trong ART source).
+    let get_vms_addr = match resolver::resolve_symbol_safe("libart.so", "JNI_GetCreatedJavaVMs") {
         Some(a) => a,
         None => {
-            dbg_log("resolve_symbol_safe art::JNI::RegisterNatives in libart.so -> None (chưa load hoặc symbol khác tên trên Android version này)");
+            dbg_log("resolve_symbol_safe JNI_GetCreatedJavaVMs -> None (libart.so chưa load?)");
             return false;
         }
     };
 
-    dbg_log(&format!("art::JNI::RegisterNatives addr: {:x}", addr));
-    match unsafe { dobby_rs::hook(addr as Address, new_register_natives_wrapper as Address) } {
-        Ok(old) => {
-            OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
-            dbg_log("art::JNI::RegisterNatives hooked successfully");
-            true
+    dbg_log(&format!("JNI_GetCreatedJavaVMs addr: {:x}", get_vms_addr));
+
+    // Chữ ký chuẩn JNI: jint JNI_GetCreatedJavaVMs(JavaVM**, jsize, jsize*)
+    type GetCreatedJavaVMsFn = unsafe extern "system" fn(
+        *mut *mut jni_sys::JavaVM,
+        jni_sys::jsize,
+        *mut jni_sys::jsize,
+    ) -> jni_sys::jint;
+
+    let get_vms: GetCreatedJavaVMsFn = unsafe { std::mem::transmute(get_vms_addr) };
+
+    let mut vm_buf: [*mut jni_sys::JavaVM; 1] = [std::ptr::null_mut()];
+    let mut num_vms: jni_sys::jsize = 0;
+
+    let result = unsafe { get_vms(vm_buf.as_mut_ptr(), 1, &mut num_vms) };
+    if result != 0 || num_vms == 0 || vm_buf[0].is_null() {
+        dbg_log(&format!(
+            "JNI_GetCreatedJavaVMs failed: result={}, num_vms={}",
+            result, num_vms
+        ));
+        return false; // ART chưa khởi tạo VM xong, thử lại vòng poll sau
+    }
+
+    let vm = vm_buf[0];
+    dbg_log(&format!("got JavaVM* = {:x}", vm as usize));
+
+    // Bước 2: GetEnv() lấy JNIEnv* của THREAD HIỆN TẠI. Nếu ctor chạy
+    // trên thread chưa attach vào JVM (không phải main thread của app),
+    // GetEnv sẽ trả lỗi JNI_EDETACHED — cần AttachCurrentThread trước.
+    unsafe {
+        let vm_functions = *vm;
+        let get_env = match (*vm_functions).GetEnv {
+            Some(f) => f,
+            None => {
+                dbg_log("JavaVM.GetEnv function pointer is null");
+                return false;
+            }
+        };
+
+        let mut env_ptr: *mut std::os::raw::c_void = std::ptr::null_mut();
+        let jni_version = 0x00010006i32; // JNI_VERSION_1_6
+        let env_result = get_env(vm, &mut env_ptr, jni_version);
+
+        let env: *mut jni_sys::JNIEnv;
+
+        if env_result == -2 {
+            // JNI_EDETACHED: thread hiện tại (watcher thread riêng của ta,
+            // hoặc ctor chạy trước khi Zygote attach xong) chưa attach vào
+            // JVM. Tự attach để có JNIEnv* hợp lệ.
+            dbg_log("GetEnv returned JNI_EDETACHED, attaching current thread...");
+            let attach = match (*vm_functions).AttachCurrentThread {
+                Some(f) => f,
+                None => {
+                    dbg_log("JavaVM.AttachCurrentThread function pointer is null");
+                    return false;
+                }
+            };
+            let attach_result = attach(vm, &mut env_ptr, std::ptr::null_mut());
+            if attach_result != 0 || env_ptr.is_null() {
+                dbg_log(&format!("AttachCurrentThread failed: {}", attach_result));
+                return false;
+            }
+            dbg_log("AttachCurrentThread succeeded");
+            env = env_ptr as *mut jni_sys::JNIEnv;
+        } else if env_result == 0 && !env_ptr.is_null() {
+            env = env_ptr as *mut jni_sys::JNIEnv;
+        } else {
+            dbg_log(&format!("GetEnv failed with unexpected code: {}", env_result));
+            return false;
         }
-        Err(e) => {
-            dbg_log(&format!("hook art::JNI::RegisterNatives failed: {:?}", e));
-            false
+
+        // Bước 3: đọc RegisterNatives TRỰC TIẾP từ function table thật —
+        // không cần tìm symbol nào cả, đây là con trỏ hàm ART tự cấp phát
+        // runtime, luôn hợp lệ với BẤT KỲ JNIEnv* nào lấy được.
+        let functions_ptr: *const jni_sys::JNINativeInterface_ = *env;
+        let register_natives_ptr = match (*functions_ptr).RegisterNatives {
+            Some(f) => f,
+            None => {
+                dbg_log("JNIEnv.RegisterNatives function pointer is null (không nên xảy ra)");
+                return false;
+            }
+        };
+
+        dbg_log(&format!(
+            "RegisterNatives addr (from JNIEnv function table): {:x}",
+            register_natives_ptr as usize
+        ));
+
+        match dobby_rs::hook(
+            register_natives_ptr as Address,
+            new_register_natives_wrapper as Address,
+        ) {
+            Ok(old) => {
+                OLD_REGISTER_NATIVES.store(old as usize, Ordering::SeqCst);
+                dbg_log("RegisterNatives hooked successfully via JNIEnv function table");
+                true
+            }
+            Err(e) => {
+                dbg_log(&format!("hook RegisterNatives failed: {:?}", e));
+                false
+            }
         }
     }
 }
