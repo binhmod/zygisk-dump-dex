@@ -318,8 +318,10 @@ static JNI_ONLOAD_HOOKED: AtomicUsize = AtomicUsize::new(0);
 static OLD_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
 static OLD_ART_OPEN_COMMON: AtomicUsize = AtomicUsize::new(0);
 static OLD_REGISTER_NATIVES: AtomicUsize = AtomicUsize::new(0);
-static TARGET_METHOD_ADDR: AtomicUsize = AtomicUsize::new(0);
-static OLD_F5E5D2631_00: AtomicUsize = AtomicUsize::new(0);
+// TARGET_METHOD_ADDR và OLD_F5E5D2631_00 (đơn lẻ) đã thay bằng mảng
+// [AtomicUsize; 10] (TARGET_METHOD_ADDR, OLD_F5E5D2631) khai báo phía
+// dưới, ngay trước phần dispatcher wrappers — để hỗ trợ đủ 10 dispatcher
+// F_00 đến F_09 thay vì chỉ F_00 như bản trước.
 
 // =========================================================================
 // Hook OpenCommon (giữ nguyên logic đã sửa đúng ABI — cả 2 hàm đều là
@@ -531,20 +533,25 @@ extern "system" fn new_register_natives_wrapper(
                 name, sig, m.fn_ptr as usize
             ));
 
-            if name == "F5e5d2631_00" && TARGET_METHOD_ADDR.load(Ordering::SeqCst) == 0 {
-                let fn_addr = m.fn_ptr as usize;
-                TARGET_METHOD_ADDR.store(fn_addr, Ordering::SeqCst);
-                dbg_log(&format!(
-                    "!!! FOUND F5e5d2631_00 dispatcher @ 0x{:x}, class={} !!!",
-                    fn_addr, class_name
-                ));
+            // Kiểm tra name có khớp 1 trong 10 dispatcher không, thay vì
+            // chỉ hardcode F5e5d2631_00 như bản trước.
+            for (dispatcher_name, idx, wrapper_addr) in dispatcher_table() {
+                if name == dispatcher_name && TARGET_METHOD_ADDR[idx].load(Ordering::SeqCst) == 0 {
+                    let fn_addr = m.fn_ptr as usize;
+                    TARGET_METHOD_ADDR[idx].store(fn_addr, Ordering::SeqCst);
+                    dbg_log(&format!(
+                        "!!! FOUND {} dispatcher @ 0x{:x}, class={} !!!",
+                        dispatcher_name, fn_addr, class_name
+                    ));
 
-                match dobby_rs::hook(fn_addr as Address, new_f5e5d2631_00_wrapper as Address) {
-                    Ok(old) => {
-                        OLD_F5E5D2631_00.store(old as usize, Ordering::SeqCst);
-                        dbg_log("F5e5d2631_00 hooked successfully");
+                    match dobby_rs::hook(fn_addr as Address, wrapper_addr) {
+                        Ok(old) => {
+                            OLD_F5E5D2631[idx].store(old as usize, Ordering::SeqCst);
+                            dbg_log(&format!("{} hooked successfully", dispatcher_name));
+                        }
+                        Err(e) => dbg_log(&format!("failed to hook {}: {:?}", dispatcher_name, e)),
                     }
-                    Err(e) => dbg_log(&format!("failed to hook F5e5d2631_00: {:?}", e)),
+                    break;
                 }
             }
         }
@@ -613,52 +620,127 @@ unsafe fn get_class_name_safe(env: *mut jni_sys::JNIEnv, clazz: jni_sys::jclass)
     std::ffi::CStr::from_ptr(c_str).to_string_lossy().to_string()
 }
 
+// =========================================================================
+// Hook đủ 10 dispatcher F_00 đến F_09 — xác nhận cấu trúc đầy đủ từ
+// chính DEX đã dump được (m5e5d2631.smali, class 779828c7.dex):
+//   F_00(I[Ljava/lang/Object;)V                  -> void
+//   F_01(I[Ljava/lang/Object;)Z                  -> boolean
+//   F_02(I[Ljava/lang/Object;)B                  -> byte
+//   F_03(I[Ljava/lang/Object;)C                  -> char
+//   F_04(I[Ljava/lang/Object;)S                  -> short
+//   F_05(I[Ljava/lang/Object;)I                  -> int
+//   F_06(I[Ljava/lang/Object;)J                  -> long
+//   F_07(I[Ljava/lang/Object;)F                  -> float
+//   F_08(I[Ljava/lang/Object;)D                  -> double
+//   F_09(I[Ljava/lang/Object;)Ljava/lang/Object; -> Object
+// Trước đây chỉ hook được F_00 (void) — bỏ sót toàn bộ method bị
+// virtualize có kiểu trả về khác void, khiến LoginActivity.
+// initializeAppSystem() (gọi F_00 nhiều lần theo log crash) là ca DUY
+// NHẤT bắt được, còn các nơi khác gọi F_01-F_09 hoàn toàn bị bỏ sót.
+// =========================================================================
+
+static OLD_F5E5D2631: [AtomicUsize; 10] = [
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+];
+static TARGET_METHOD_ADDR: [AtomicUsize; 10] = [
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0),
+    AtomicUsize::new(0), AtomicUsize::new(0),
+];
+
+fn log_method_call(idx: usize, method_id: jni_sys::jint, ret_desc: &str) {
+    if let Ok(cmdline) = std::fs::read_to_string("/proc/self/cmdline") {
+        if let Some(package) = cmdline.split('\0').next() {
+            let dir = format!("/data/data/{}/dexes", package);
+            let _ = std::fs::create_dir_all(&dir);
+            let log_path = format!("{}/method_calls.log", dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                use std::io::Write;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0);
+                let _ = writeln!(f, "[{}] F_{:02} ret={} methodId={}", ts, idx, ret_desc, method_id);
+            }
+        }
+    }
+}
+
+// Macro sinh 1 wrapper cho mỗi return type, tránh lặp lại 10 lần thủ công.
+// $idx: chỉ số 0-9 (khớp OLD_F5E5D2631[$idx]/TARGET_METHOD_ADDR[$idx])
+// $wrapper_name: tên hàm wrapper sẽ sinh ra
+// $ret_ty: kiểu trả về JNI (jni_sys::jboolean, jni_sys::jint, ...) hoặc
+//          để trống cho void
+macro_rules! make_dispatcher_wrapper {
+    ($wrapper_name:ident, $idx:expr, $ret_ty:ty, $ret_desc:expr) => {
+        extern "system" fn $wrapper_name(
+            env: *mut jni_sys::JNIEnv,
+            clazz: jni_sys::jclass,
+            method_id: jni_sys::jint,
+            args: jni_sys::jobjectArray,
+        ) -> $ret_ty {
+            log_method_call($idx, method_id, $ret_desc);
+            unsafe {
+                let orig: extern "system" fn(
+                    *mut jni_sys::JNIEnv,
+                    jni_sys::jclass,
+                    jni_sys::jint,
+                    jni_sys::jobjectArray,
+                ) -> $ret_ty = std::mem::transmute(OLD_F5E5D2631[$idx].load(Ordering::SeqCst));
+                orig(env, clazz, method_id, args)
+            }
+        }
+    };
+}
+
+// Wrapper riêng cho void (F_00) vì không có return value — macro trên
+// yêu cầu 1 kiểu cụ thể, void cần xử lý tách biệt.
 extern "system" fn new_f5e5d2631_00_wrapper(
     env: *mut jni_sys::JNIEnv,
     clazz: jni_sys::jclass,
     method_id: jni_sys::jint,
     args: jni_sys::jobjectArray,
 ) {
-    dbg_log(&format!(
-        "F5e5d2631_00 CALLED: methodId={} args_ptr=0x{:x}",
-        method_id, args as usize
-    ));
-
-    unsafe {
-        let array_len = if !args.is_null() {
-            let functions: *const jni_sys::JNINativeInterface_ = *env;
-            match (*functions).GetArrayLength {
-                Some(get_len) => get_len(env, args as jni_sys::jarray),
-                None => -1,
-            }
-        } else {
-            -1
-        };
-
-        if let Ok(cmdline) = std::fs::read_to_string("/proc/self/cmdline") {
-            if let Some(package) = cmdline.split('\0').next() {
-                let dir = format!("/data/data/{}/dexes", package);
-                let _ = std::fs::create_dir_all(&dir);
-                let log_path = format!("{}/method_calls.log", dir);
-                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-                    use std::io::Write;
-                    let ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let _ = writeln!(f, "[{}] methodId={} args_len={}", ts, method_id, array_len);
-                }
-            }
-        }
-    }
-
+    log_method_call(0, method_id, "void");
     unsafe {
         let orig: extern "system" fn(
             *mut jni_sys::JNIEnv,
             jni_sys::jclass,
             jni_sys::jint,
             jni_sys::jobjectArray,
-        ) = std::mem::transmute(OLD_F5E5D2631_00.load(Ordering::SeqCst));
+        ) = std::mem::transmute(OLD_F5E5D2631[0].load(Ordering::SeqCst));
         orig(env, clazz, method_id, args)
     }
 }
+
+make_dispatcher_wrapper!(new_f5e5d2631_01_wrapper, 1, jni_sys::jboolean, "boolean");
+make_dispatcher_wrapper!(new_f5e5d2631_02_wrapper, 2, jni_sys::jbyte, "byte");
+make_dispatcher_wrapper!(new_f5e5d2631_03_wrapper, 3, jni_sys::jchar, "char");
+make_dispatcher_wrapper!(new_f5e5d2631_04_wrapper, 4, jni_sys::jshort, "short");
+make_dispatcher_wrapper!(new_f5e5d2631_05_wrapper, 5, jni_sys::jint, "int");
+make_dispatcher_wrapper!(new_f5e5d2631_06_wrapper, 6, jni_sys::jlong, "long");
+make_dispatcher_wrapper!(new_f5e5d2631_07_wrapper, 7, jni_sys::jfloat, "float");
+make_dispatcher_wrapper!(new_f5e5d2631_08_wrapper, 8, jni_sys::jdouble, "double");
+make_dispatcher_wrapper!(new_f5e5d2631_09_wrapper, 9, jni_sys::jobject, "Object");
+
+// Bảng tra cứu: tên method (theo suffix _00 đến _09) -> (index, con trỏ
+// wrapper tương ứng). Dùng để match trong vòng lặp RegisterNatives mà
+// không cần if/else lặp lại 10 lần.
+fn dispatcher_table() -> [(&'static str, usize, Address); 10] {
+    [
+        ("F5e5d2631_00", 0, new_f5e5d2631_00_wrapper as Address),
+        ("F5e5d2631_01", 1, new_f5e5d2631_01_wrapper as Address),
+        ("F5e5d2631_02", 2, new_f5e5d2631_02_wrapper as Address),
+        ("F5e5d2631_03", 3, new_f5e5d2631_03_wrapper as Address),
+        ("F5e5d2631_04", 4, new_f5e5d2631_04_wrapper as Address),
+        ("F5e5d2631_05", 5, new_f5e5d2631_05_wrapper as Address),
+        ("F5e5d2631_06", 6, new_f5e5d2631_06_wrapper as Address),
+        ("F5e5d2631_07", 7, new_f5e5d2631_07_wrapper as Address),
+        ("F5e5d2631_08", 8, new_f5e5d2631_08_wrapper as Address),
+        ("F5e5d2631_09", 9, new_f5e5d2631_09_wrapper as Address),
+    ]
+}
+
+
