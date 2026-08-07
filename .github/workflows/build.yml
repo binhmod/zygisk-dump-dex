@@ -347,7 +347,7 @@ jobs:
 
           cp \
             build/libdump_dex_payload.so \
-            "out/payload_dumpdex_${matrix.abi}.so"
+            "out/payload_dumpdex_${{ matrix.abi }}.so"
 
           echo ""
           echo "============================================================"
@@ -355,7 +355,7 @@ jobs:
           echo "============================================================"
 
           ls -lah out/
-          file "out/payload_dumpdex_${matrix.abi}.so"
+          file "out/payload_dumpdex_${{ matrix.abi }}.so"
 
 
       # ============================================================
@@ -365,5 +365,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: payload_dumpdex-${{ matrix.abi }}
-          path: "out/payload_dumpdex_${matrix.abi}.so"
+          path: "out/payload_dumpdex_${{ matrix.abi }}.so"
           if-no-files-found: error
