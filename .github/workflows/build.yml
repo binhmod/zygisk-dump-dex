@@ -131,14 +131,27 @@ jobs:
 
 
       # ============================================================
-      # Android NDK r27c
+      # Android NDK r29
+      #
+      # LSPlant is compiled from source (CMake add_subdirectory) and needs a
+      # modern clang (LLVM 21). r27c ships LLVM 18, which trips LSPlant's
+      # internal SFINAE ("lambda -> signature" extraction) at compile time.
+      # r29 also matches the NDK LSPlant's own CI pin (29.0.13599879).
       # ============================================================
-      - name: Set up Android NDK
-        uses: nttld/setup-ndk@v1
-        id: setup-ndk
-        with:
-          ndk-version: r27c
-          add-to-path: true
+      - name: Set up Android NDK r29
+        run: |
+          set -e
+
+          NDK_VERSION="29.0.14206865"
+
+          sdkmanager "ndk;${NDK_VERSION}" >/dev/null
+
+          NDK_HOME="${ANDROID_HOME}/ndk/${NDK_VERSION}"
+          echo "ANDROID_NDK_HOME=${NDK_HOME}" >> "$GITHUB_ENV"
+
+          echo "=== NDK installed to ==="
+          ls -d "${NDK_HOME}"
+          "${NDK_HOME}"/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --version
 
 
       # ============================================================
@@ -238,10 +251,10 @@ jobs:
           echo "============================================================"
 
           echo "NDK path:"
-          echo "${{ steps.setup-ndk.outputs.ndk-path }}"
+          echo "$ANDROID_NDK_HOME"
 
           test -f \
-            "${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake"
+            "$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
 
 
       # ============================================================
@@ -269,7 +282,7 @@ jobs:
           cmake -B build \
             -G Ninja \
             -DCMAKE_MAKE_PROGRAM=/usr/local/bin/ninja \
-            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-29 \
             -DANDROID_D8="${D8_PATH}" \
