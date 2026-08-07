@@ -26,6 +26,7 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
 #include "hook_stub_dex.h"
 
@@ -296,9 +297,19 @@ static void hook_all_dispatchers(JNIEnv *env) {
 }
 
 static JNIEnv *get_jni_env() {
+    typedef jint (*GetCreatedJavaVMs_t)(JavaVM *, jsize, void *);
+
+    // JNI_GetCreatedJavaVMs lives in ART (libnativehelper) of the running
+    // process, so resolve it at runtime instead of linking against it.
+    static GetCreatedJavaVMs_t GetCreatedJavaVMs =
+        reinterpret_cast<GetCreatedJavaVMs_t>(dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
+    if (GetCreatedJavaVMs == nullptr) {
+        return nullptr;
+    }
+
     JavaVM *vm = nullptr;
     jsize num_vms = 0;
-    if (JNI_GetCreatedJavaVMs(&vm, 1, &num_vms) != JNI_OK || num_vms == 0 || vm == nullptr) {
+    if (GetCreatedJavaVMs(&vm, 1, &num_vms) != JNI_OK || num_vms == 0 || vm == nullptr) {
         return nullptr;
     }
 
