@@ -226,6 +226,7 @@ elseif(
 
     file(GLOB_RECURSE LSPLANT_SO_FILES
         "${LSPLANT_BUILD_DIR}/*.so"
+        "${LSPLANT_BUILD_DIR}/*.a"
     )
 
 
@@ -263,22 +264,35 @@ elseif(
     # =========================================================================
 
     set(LSPLANT_TARGET_FOUND FALSE)
+    set(LSPLANT_STATIC_TARGETS "")
 
 
-    foreach(LSPLANT_SO IN LISTS LSPLANT_SO_FILES)
+    foreach(LSPLANT_LIB IN LISTS LSPLANT_SO_FILES)
+
+        # Only import the library for the ABI we are currently building.
+        if(NOT "${LSPLANT_LIB}" MATCHES "/${ANDROID_ABI}/")
+            continue()
+        endif()
 
         get_filename_component(
-            SO_NAME
-            "${LSPLANT_SO}"
+            LIB_NAME
+            "${LSPLANT_LIB}"
             NAME_WE
         )
+
+        # libc++_shared.so must NOT become a runtime dependency of the payload
+        # (injected single .so, libc++ is linked statically instead).
+        if(LIB_NAME STREQUAL "libc++_shared")
+            message(STATUS "Skipping ${LSPLANT_LIB} (payload links libc++ statically)")
+            continue()
+        endif()
 
         string(
             REGEX REPLACE
             "^lib"
             ""
             TARGET_NAME
-            "${SO_NAME}"
+            "${LIB_NAME}"
         )
 
         string(
@@ -288,25 +302,33 @@ elseif(
             "${TARGET_NAME}"
         )
 
-
         # Avoid duplicate target names
         if(NOT TARGET "${TARGET_NAME}")
 
-            add_library(
-                "${TARGET_NAME}"
-                UNKNOWN
-                IMPORTED
-            )
+            if(LSPLANT_LIB MATCHES "\\.a$")
+                # Static archive: link into the payload so it needs no
+                # companion .so at runtime.
+                add_library(
+                    "${TARGET_NAME}"
+                    STATIC
+                    IMPORTED
+                )
+                list(APPEND LSPLANT_STATIC_TARGETS "${TARGET_NAME}")
+                message(STATUS "Imported static target '${TARGET_NAME}'")
+            else()
+                add_library(
+                    "${TARGET_NAME}"
+                    UNKNOWN
+                    IMPORTED
+                )
+                message(STATUS "Imported shared target '${TARGET_NAME}'")
+            endif()
 
             set_target_properties(
                 "${TARGET_NAME}"
                 PROPERTIES
                 IMPORTED_LOCATION
-                "${LSPLANT_SO}"
-            )
-
-            message(STATUS
-                "Imported target '${TARGET_NAME}'"
+                "${LSPLANT_LIB}"
             )
 
         endif()
@@ -521,9 +543,8 @@ target_include_directories(dump_dex_payload PRIVATE
 )
 
 target_link_libraries(dump_dex_payload PRIVATE
-    lsplant
+    ${LSPLANT_STATIC_TARGETS}
     dobby_static
-    c++_shared
     log
     dl
 )
