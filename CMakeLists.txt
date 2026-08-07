@@ -449,7 +449,39 @@ elseif(
 
 
 # =========================================================================
+# LSPlant not found
+# =========================================================================
+
+else()
+
+    message(FATAL_ERROR
+        "============================================================\n"
+        "LSPlant was not found or is not buildable.\n"
+        "============================================================\n"
+        "\n"
+        "Expected one of:\n"
+        "\n"
+        "  ${LSPLANT_JNI_CMAKE}\n"
+        "\n"
+        "or:\n"
+        "\n"
+        "  ${LSPLANT_ROOT}/gradlew\n"
+        "  ${LSPLANT_DIR}/gradlew\n"
+        "\n"
+        "Check that the LSPlant submodule was initialized correctly:\n"
+        "\n"
+        "  git submodule update --init --recursive third_party/LSPlant\n"
+    )
+
+endif()
+
+
+# =========================================================================
 # Build payload: libdump_dex_payload.so
+#
+# This section runs for BOTH LSPlant build paths:
+#   - Option 1: LSPlant compiled from source (add_subdirectory)
+#   - Option 2: LSPlant imported from Gradle output
 # =========================================================================
 
 # ---------------------------------------------------------------------
@@ -576,31 +608,3 @@ target_link_libraries(dump_dex_payload PRIVATE
 set_source_files_properties("${CMAKE_SOURCE_DIR}/src/main.cpp" PROPERTIES
     OBJECT_DEPENDS "${HOOK_STUB_HDR}"
 )
-
-
-# =========================================================================
-# LSPlant not found
-# =========================================================================
-
-else()
-
-    message(FATAL_ERROR
-        "============================================================\n"
-        "LSPlant was not found or is not buildable.\n"
-        "============================================================\n"
-        "\n"
-        "Expected one of:\n"
-        "\n"
-        "  ${LSPLANT_DIR}/CMakeLists.txt\n"
-        "\n"
-        "or:\n"
-        "\n"
-        "  ${LSPLANT_ROOT}/gradlew\n"
-        "  ${LSPLANT_DIR}/gradlew\n"
-        "\n"
-        "Check that the LSPlant submodule was initialized correctly:\n"
-        "\n"
-        "  git submodule update --init --recursive third_party/LSPlant\n"
-    )
-
-endif()
