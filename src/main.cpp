@@ -21,12 +21,17 @@
 #include <dobby.h>
 #include <lsplant.hpp>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <chrono>
 #include <fstream>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include <link.h>
+#include <elf.h>
+#include <cstring>
+#include <cstdint>
 
 #include "hook_stub_dex.h"
 
@@ -83,6 +88,87 @@ static void *InlineHooker(void *target, void *hooker) {
 static bool InlineUnhooker(void *func) {
     return DobbyDestroy(func) == 0;
 }
+
+// ---------------------------------------------------------------------------
+// ART symbol resolvers for lsplant::InitInfo
+//
+// LSPlant requires BOTH a resolver that returns the exact symbol address and a
+// prefix resolver. We resolve from the already-loaded libart.so (the running
+// ART runtime) instead of depending on lsparself (a separate build dep that
+// LSPlant's test module uses but we do not vendor).
+// ---------------------------------------------------------------------------
+
+static void *ArtSymbolResolver(std::string_view symbol) {
+    static void *art_handle = []() -> void * {
+        // libart.so is already loaded by the running process; dlopen just
+        // bumps the refcount. Keep the handle cached for the whole session.
+        return dlopen("libart.so", RTLD_NOW | RTLD_GLOBAL);
+    }();
+    if (art_handle == nullptr) {
+        return nullptr;
+    }
+    return dlsym(art_handle, symbol.data());
+}
+
+// Finds the load bias (base address) of libart.so in the current process.
+static uintptr_t FindLibartBase() {
+    static uintptr_t base = []() -> uintptr_t {
+        uintptr_t found = 0;
+        dl_iterate_phdr([](struct dl_phdr_info *info, size_t, void *data) -> int {
+            if (info->dlpi_name == nullptr || *info->dlpi_name == '\0') {
+                return 0;
+            }
+            std::string_view name(info->dlpi_name);
+            if (name.find("libart.so") == std::string_view::npos) {
+                return 0;
+            }
+            *static_cast<uintptr_t *>(data) = info->dlpi_addr;
+            return 1;
+        }, &found);
+        return found;
+    }();
+    return base;
+}
+
+// Resolves the first .dynsym symbol in libart.so whose name starts with the
+// given prefix (LSPlant's art_symbol_prefix_resolver contract).
+static void *ArtSymbolPrefixResolver(std::string_view prefix) {
+    uintptr_t base = FindLibartBase();
+    if (base == 0 || prefix.empty()) {
+        return nullptr;
+    }
+
+    auto *ehdr = reinterpret_cast<const ElfW(Ehdr) *>(base);
+    if (ehdr->e_shoff == 0 || ehdr->e_shnum == 0 || ehdr->e_shentsize == 0) {
+        return nullptr;
+    }
+
+    auto *shdrs = reinterpret_cast<const ElfW(Shdr) *>(base + ehdr->e_shoff);
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        const ElfW(Shdr) &sh = shdrs[i];
+        if (sh.sh_type != SHT_DYNSYM) {
+            continue;
+        }
+        auto *symtab = reinterpret_cast<const ElfW(Sym) *>(base + sh.sh_addr);
+        auto *strtab = reinterpret_cast<const char *>(base + shdrs[sh.sh_link].sh_addr);
+        if (symtab == nullptr || strtab == nullptr) {
+            continue;
+        }
+        size_t count = sh.sh_size / sh.sh_entsize;
+        for (size_t j = 0; j < count; j++) {
+            const ElfW(Sym) &sym = symtab[j];
+            if (sym.st_name == 0 || sym.st_shndx == SHN_UNDEF) {
+                continue;
+            }
+            const char *name = strtab + sym.st_name;
+            if (std::strncmp(name, prefix.data(), prefix.size()) == 0) {
+                return reinterpret_cast<void *>(base + sym.st_value);
+            }
+        }
+    }
+    return nullptr;
+}
+
 
 static jobject g_backup_methods[10] = {nullptr};
 
@@ -335,14 +421,21 @@ static void watcher_thread_fn() {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         JNIEnv *env = get_jni_env();
-        if (env == nullptr) continue;
+        if (env == nullptr) {
+            if (i % 50 == 0) {
+                dbg_log("get_jni_env() returned null (poll " + std::to_string(i) + ")");
+            }
+            continue;
+        }
 
         if (!lsplant_initialized) {
             lsplant::InitInfo init_info{
                 .inline_hooker = InlineHooker,
                 .inline_unhooker = InlineUnhooker,
-                .art_symbol_resolver = nullptr,
+                .art_symbol_resolver = ArtSymbolResolver,
+                .art_symbol_prefix_resolver = ArtSymbolPrefixResolver,
             };
+            dbg_log("calling lsplant::Init...");
             lsplant_initialized = lsplant::Init(env, init_info);
             dbg_log(std::string("lsplant::Init result: ") + (lsplant_initialized ? "SUCCESS" : "FAILED"));
         }

@@ -1,0 +1,147 @@
+1786082814.755 10255 17925 17925 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082814.797 10255 17925 17925 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082814.798 10255 17925 17925 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082814.814 10255 17925 17944 I dump_dex_cpp: watcher thread started
+1786082814.850 10255 17925 17925 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082815.023 10255 17925 17925 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082815.025 10255 17925 17925 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082815.224 10255 17925 17925 W com.vip.ping: type=1400 audit(0.0:2646): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082815.488 10255 17957 17957 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082815.524 10255 17957 17957 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082815.525 10255 17957 17957 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082815.527 10255 17957 17969 I dump_dex_cpp: watcher thread started
+1786082815.562 10255 17957 17957 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082815.637 10255 17957 17957 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082815.637 10255 17957 17957 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082815.784 10255 17957 17957 W com.vip.ping: type=1400 audit(0.0:2649): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082815.986 10255 17988 17988 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082816.023 10255 17988 17988 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082816.024 10255 17988 17988 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082816.034 10255 17988 18000 I dump_dex_cpp: watcher thread started
+1786082816.065 10255 17988 17988 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082816.161 10255 17988 17988 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082816.162 10255 17988 17988 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082816.314 10255 17988 17988 W com.vip.ping: type=1400 audit(0.0:2652): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082816.524 10255 18010 18010 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082816.558 10255 18010 18010 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082816.558 10255 18010 18010 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082816.561 10255 18010 18022 I dump_dex_cpp: watcher thread started
+1786082816.594 10255 18010 18010 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082816.677 10255 18010 18010 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082816.678 10255 18010 18010 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082816.824 10255 18010 18010 W com.vip.ping: type=1400 audit(0.0:2655): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082817.035 10255 18041 18041 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082817.076 10255 18041 18041 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082817.077 10255 18041 18041 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082817.079 10255 18041 18054 I dump_dex_cpp: watcher thread started
+1786082817.112 10255 18041 18041 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082817.183 10255 18041 18041 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082817.184 10255 18041 18041 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082817.324 10255 18041 18041 W com.vip.ping: type=1400 audit(0.0:2658): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082817.507 10255 18064 18064 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082817.539 10255 18064 18064 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082817.540 10255 18064 18064 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082817.541 10255 18064 18076 I dump_dex_cpp: watcher thread started
+1786082817.574 10255 18064 18064 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082817.684 10255 18064 18064 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082817.685 10255 18064 18064 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082818.149 10255 18095 18095 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082818.186 10255 18095 18095 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082818.188 10255 18095 18107 I dump_dex_cpp: watcher thread started
+1786082818.188 10255 18095 18095 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082818.223 10255 18095 18095 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082818.297 10255 18095 18095 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082818.297 10255 18095 18095 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082818.434 10255 18095 18095 W com.vip.ping: type=1400 audit(0.0:2679): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082818.625 10255 18118 18118 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082818.659 10255 18118 18118 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082818.660 10255 18118 18118 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082818.660 10255 18118 18132 I dump_dex_cpp: watcher thread started
+1786082818.714 10255 18118 18118 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082818.817 10255 18118 18118 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082818.818 10255 18118 18118 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082818.954 10255 18118 18118 W com.vip.ping: type=1400 audit(0.0:2682): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082819.200 10255 18148 18148 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082819.236 10255 18148 18148 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082819.239 10255 18148 18160 I dump_dex_cpp: watcher thread started
+1786082819.240 10255 18148 18148 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082819.278 10255 18148 18148 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082819.347 10255 18148 18148 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082819.348 10255 18148 18148 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082819.484 10255 18148 18148 W com.vip.ping: type=1400 audit(0.0:2685): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082819.682 10255 18171 18171 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082819.714 10255 18171 18171 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082819.715 10255 18171 18171 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082819.718 10255 18171 18189 I dump_dex_cpp: watcher thread started
+1786082819.751 10255 18171 18171 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082819.829 10255 18171 18171 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082819.829 10255 18171 18171 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082819.964 10255 18171 18171 W com.vip.ping: type=1400 audit(0.0:2688): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082820.206 10255 18200 18200 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082820.239 10255 18200 18200 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082820.240 10255 18200 18212 I dump_dex_cpp: watcher thread started
+1786082820.241 10255 18200 18200 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082820.277 10255 18200 18200 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082820.342 10255 18200 18200 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082820.342 10255 18200 18200 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082820.686 10255 18224 18224 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082820.726 10255 18224 18224 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082820.727 10255 18224 18224 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082820.743 10255 18224 18241 I dump_dex_cpp: watcher thread started
+1786082820.809 10255 18224 18224 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082820.879 10255 18224 18224 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082820.879 10255 18224 18224 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082821.014 10255 18224 18224 W com.vip.ping: type=1400 audit(0.0:2696): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082821.191 10255 18252 18252 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082821.223 10255 18252 18252 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082821.224 10255 18252 18264 I dump_dex_cpp: watcher thread started
+1786082821.225 10255 18252 18252 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082821.260 10255 18252 18252 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082821.325 10255 18252 18252 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082821.326 10255 18252 18252 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082821.641 10255 18275 18275 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082821.674 10255 18275 18275 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082821.676 10255 18275 18275 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082821.680 10255 18275 18291 I dump_dex_cpp: watcher thread started
+1786082821.712 10255 18275 18275 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082821.784 10255 18275 18275 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082821.784 10255 18275 18275 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082821.914 10255 18275 18275 W com.vip.ping: type=1400 audit(0.0:2700): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082822.100 10255 18305 18305 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082822.131 10255 18305 18305 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082822.133 10255 18305 18317 I dump_dex_cpp: watcher thread started
+1786082822.133 10255 18305 18305 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082822.167 10255 18305 18305 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082822.239 10255 18305 18305 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082822.240 10255 18305 18305 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082822.374 10255 18305 18305 W com.vip.ping: type=1400 audit(0.0:2703): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082822.567 10255 18327 18327 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082822.599 10255 18327 18327 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082822.600 10255 18327 18339 I dump_dex_cpp: watcher thread started
+1786082822.600 10255 18327 18327 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082822.638 10255 18327 18327 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082822.706 10255 18327 18327 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082822.707 10255 18327 18327 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082823.026 10255 18358 18358 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082823.058 10255 18358 18358 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082823.059 10255 18358 18358 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082823.064 10255 18358 18370 I dump_dex_cpp: watcher thread started
+1786082823.096 10255 18358 18358 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082823.159 10255 18358 18358 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082823.160 10255 18358 18358 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082823.304 10255 18358 18358 W com.vip.ping: type=1400 audit(0.0:2709): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
+1786082823.496 10255 18382 18382 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082823.531 10255 18382 18382 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082823.532 10255 18382 18382 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082823.534 10255 18382 18394 I dump_dex_cpp: watcher thread started
+1786082823.567 10255 18382 18382 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082823.628 10255 18382 18382 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082823.628 10255 18382 18382 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082823.977 10255 18413 18413 E com.vip.ping: Not starting debugger since process cannot load the jdwp agent.
+1786082824.008 10255 18413 18413 I dump_dex_cpp: === dump_dex_payload (C++/LSPlant) constructor called ===
+1786082824.009 10255 18413 18425 I dump_dex_cpp: watcher thread started
+1786082824.010 10255 18413 18413 I Zygisk-Loader: Injection successful — loaded via memfd
+1786082824.045 10255 18413 18413 W com.vip.ping: Core platform API violation: Ljava/lang/reflect/Field;->accessFlags:I from Landroid/os/Build; using reflection
+1786082824.112 10255 18413 18413 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082824.113 10255 18413 18413 D NetworkSecurityConfig: No Network Security Config specified, using platform default
+1786082824.244 10255 18413 18413 W com.vip.ping: type=1400 audit(0.0:2717): avc: granted { execute } for path="/data/data/com.vip.ping/files/.ss/l5e5d2631.so" dev="mmcblk0p53" ino=1045810 scontext=u:r:untrusted_app:s0:c255,c256,c512,c768 tcontext=u:object_r:app_data_file:s0:c255,c256,c512,c768 tclass=file app=com.vip.ping
