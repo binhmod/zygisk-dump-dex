@@ -169,6 +169,65 @@ static void *ArtSymbolPrefixResolver(std::string_view prefix) {
     return nullptr;
 }
 
+// Scans the given loaded module's .dynsym for an exact symbol name.
+static void *ScanModuleSymbol(uintptr_t base, const char *want) {
+    if (base == 0 || want == nullptr || *want == '\0') {
+        return nullptr;
+    }
+    auto *ehdr = reinterpret_cast<const ElfW(Ehdr) *>(base);
+    if (ehdr->e_shoff == 0 || ehdr->e_shnum == 0 || ehdr->e_shentsize == 0) {
+        return nullptr;
+    }
+    auto *shdrs = reinterpret_cast<const ElfW(Shdr) *>(base + ehdr->e_shoff);
+    for (int i = 0; i < ehdr->e_shnum; i++) {
+        const ElfW(Shdr) &sh = shdrs[i];
+        if (sh.sh_type != SHT_DYNSYM) {
+            continue;
+        }
+        auto *symtab = reinterpret_cast<const ElfW(Sym) *>(base + sh.sh_addr);
+        auto *strtab = reinterpret_cast<const char *>(base + shdrs[sh.sh_link].sh_addr);
+        if (symtab == nullptr || strtab == nullptr) {
+            continue;
+        }
+        size_t count = sh.sh_size / sh.sh_entsize;
+        for (size_t j = 0; j < count; j++) {
+            const ElfW(Sym) &sym = symtab[j];
+            if (sym.st_name == 0 || sym.st_shndx == SHN_UNDEF) {
+                continue;
+            }
+            if (std::strcmp(strtab + sym.st_name, want) == 0) {
+                return reinterpret_cast<void *>(base + sym.st_value);
+            }
+        }
+    }
+    return nullptr;
+}
+
+// Finds an exact exported symbol in ANY loaded shared library.
+static void *ResolveSymbolAnywhere(const char *name) {
+    if (name == nullptr) {
+        return nullptr;
+    }
+    struct Match {
+        const char *name;
+        void *addr;
+    } match{name, nullptr};
+    dl_iterate_phdr([](struct dl_phdr_info *info, size_t, void *data) -> int {
+        auto *m = static_cast<Match *>(data);
+        if (info->dlpi_name == nullptr || *info->dlpi_name == '\0' ||
+            info->dlpi_addr == 0) {
+            return 0;
+        }
+        void *addr = ScanModuleSymbol(info->dlpi_addr, m->name);
+        if (addr != nullptr) {
+            m->addr = addr;
+            return 1;
+        }
+        return 0;
+    }, &match);
+    return match.addr;
+}
+
 
 static jobject g_backup_methods[10] = {nullptr};
 
@@ -385,10 +444,17 @@ static void hook_all_dispatchers(JNIEnv *env) {
 static JNIEnv *get_jni_env() {
     typedef jint (*GetCreatedJavaVMs_t)(JavaVM **, jsize, jsize *);
 
-    // JNI_GetCreatedJavaVMs lives in ART (libnativehelper) of the running
-    // process, so resolve it at runtime instead of linking against it.
+    // JNI_GetCreatedJavaVMs is exported by a runtime library (ART/libnativehelper)
+    // of the running process. Resolve it by scanning every loaded module's .dynsym
+    // (most reliable), falling back to a global dlsym lookup.
     static GetCreatedJavaVMs_t GetCreatedJavaVMs =
-        reinterpret_cast<GetCreatedJavaVMs_t>(dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
+        reinterpret_cast<GetCreatedJavaVMs_t>(ResolveSymbolAnywhere("JNI_GetCreatedJavaVMs"));
+
+    if (GetCreatedJavaVMs == nullptr) {
+        GetCreatedJavaVMs = reinterpret_cast<GetCreatedJavaVMs_t>(
+            dlsym(RTLD_DEFAULT, "JNI_GetCreatedJavaVMs"));
+    }
+
     if (GetCreatedJavaVMs == nullptr) {
         return nullptr;
     }
