@@ -73,8 +73,7 @@ static void log_method_call(int dispatcher_idx, jint method_id) {
 
 static void *InlineHooker(void *target, void *hooker) {
     void *backup = nullptr;
-    if (DobbyHook(target, reinterpret_cast<dobby_dummy_func_t>(hooker),
-                  reinterpret_cast<dobby_dummy_func_t *>(&backup)) == 0) {
+    if (DobbyHook(target, hooker, &backup) == 0) {
         return backup;
     }
     return nullptr;

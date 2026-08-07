@@ -35,7 +35,26 @@ jobs:
 
           git submodule sync --recursive
           git submodule update --init --recursive third_party/LSPlant
-          git submodule update --init --recursive third_party/Dobby
+
+          # jmpews/Dobby master does not build on Android (broken circular
+          # include + arm64 asm). Use the patched fork auag0/Dobby.
+          # Clone directly instead of via git submodule to avoid a stale
+          # git-link SHA pointing at the old (unbuildable) upstream.
+          git clone --depth 1 --recursive \
+            https://github.com/auag0/Dobby.git \
+            third_party/Dobby
+
+          # Safety: if the fork still carries the arm64 `adrp`-to-undefined
+          # symbol issue, load the handler pointer from its .quad instead.
+          ASM=third_party/Dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
+          if [ -f "$ASM" ]; then
+            sed -i \
+              -e 's|adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE|ldr TMP_REG_0, cdecl(common_closure_bridge_handler_addr)|' \
+              -e '/add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF/d' \
+              "$ASM"
+          else
+            echo "asm fix not needed for this Dobby fork"
+          fi
 
 
       # ============================================================
