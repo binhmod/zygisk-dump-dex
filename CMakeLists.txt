@@ -17,6 +17,15 @@ set(LSPLANT_DIR
     "${LSPLANT_ROOT}/lsplant"
 )
 
+# The buildable LSPlant CMake project lives under .../lsplant/src/main/jni.
+set(LSPLANT_JNI_DIR
+    "${LSPLANT_DIR}/src/main/jni"
+)
+
+set(LSPLANT_JNI_CMAKE
+    "${LSPLANT_JNI_DIR}/CMakeLists.txt"
+)
+
 message(STATUS "============================================================")
 message(STATUS "LSPlant configuration")
 message(STATUS "LSPLANT_ROOT = ${LSPLANT_ROOT}")
@@ -25,18 +34,27 @@ message(STATUS "============================================================")
 
 
 # =========================================================================
-# Option 1: LSPlant provides CMakeLists.txt
+# Option 1: LSPlant ships a CMakeLists.txt (jni source tree)
 # =========================================================================
 
-if(EXISTS "${LSPLANT_DIR}/CMakeLists.txt")
+if(EXISTS "${LSPLANT_JNI_CMAKE}")
 
     message(STATUS "LSPlant CMakeLists.txt found")
-    message(STATUS "Using CMake build: ${LSPLANT_DIR}")
+    message(STATUS "Using CMake build: ${LSPLANT_JNI_DIR}")
+
+    # We embed LSPlant statically into the payload, so there is no need for
+    # the standalone shared library (which also forces -flto + C++ modules).
+    set(LSPLANT_BUILD_SHARED OFF CACHE INTERNAL "" FORCE)
 
     add_subdirectory(
-        "${LSPLANT_DIR}"
+        "${LSPLANT_JNI_DIR}"
         "${CMAKE_BINARY_DIR}/lsplant_build"
     )
+
+    # Build everything from source with the SAME NDK toolchain as the payload,
+    # so the static archives share LLVM bitcode. lsplant_static is produced by
+    # the jni CMakeLists and transitively links dex_builder_static.
+    set(LSPLANT_STATIC_LIBRARY lsplant_static)
 
 
 # =========================================================================
@@ -542,8 +560,13 @@ target_include_directories(dump_dex_payload PRIVATE
     "${DOBBY_DIR}/include"
 )
 
+if(NOT DEFINED LSPLANT_STATIC_LIBRARY)
+    # Gradle-fallback branch: reuse previously imported static archives.
+    set(LSPLANT_STATIC_LIBRARY ${LSPLANT_STATIC_TARGETS})
+endif()
+
 target_link_libraries(dump_dex_payload PRIVATE
-    ${LSPLANT_STATIC_TARGETS}
+    ${LSPLANT_STATIC_LIBRARY}
     dobby_static
     log
     dl
