@@ -1,0 +1,6 @@
+[submodule "third_party/LSPlant"]
+	path = third_party/LSPlant
+	url = https://github.com/JingMatrix/LSPlant.git
+[submodule "third_party/Dobby"]
+	path = third_party/Dobby
+	url = https://github.com/jmpews/Dobby.git

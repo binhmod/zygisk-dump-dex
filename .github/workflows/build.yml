@@ -1,0 +1,332 @@
+name: Build Dump Dex Payload (C++/LSPlant)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Payload
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ============================================================
+      # Checkout
+      # ============================================================
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+
+      # ============================================================
+      # Initialize LSPlant + nested submodules
+      # ============================================================
+      - name: Init required submodules
+        run: |
+          set -e
+
+          git submodule sync --recursive
+          git submodule update --init --recursive third_party/LSPlant
+          git submodule update --init --recursive third_party/Dobby
+
+
+      # ============================================================
+      # Debug LSPlant
+      # ============================================================
+      - name: Debug — verify LSPlant structure
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "Git submodules"
+          echo "============================================================"
+
+          git submodule status --recursive
+
+          echo ""
+          echo "============================================================"
+          echo "LSPlant root"
+          echo "============================================================"
+
+          ls -la third_party/LSPlant/
+
+          echo ""
+          echo "============================================================"
+          echo "LSPlant CMake files"
+          echo "============================================================"
+
+          find third_party/LSPlant \
+            -maxdepth 7 \
+            -name "CMakeLists.txt" \
+            -print
+
+          echo ""
+          echo "============================================================"
+          echo "LSPlant Gradle files"
+          echo "============================================================"
+
+          find third_party/LSPlant \
+            -maxdepth 4 \
+            \( -name "build.gradle" -o -name "build.gradle.kts" \) \
+            -print
+
+
+      # ============================================================
+      # JDK 17
+      # ============================================================
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+
+      # ============================================================
+      # Android SDK
+      # ============================================================
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+
+      # ============================================================
+      # Android Build Tools / D8
+      # ============================================================
+      - name: Install build-tools (for d8)
+        run: |
+          set -e
+
+          sdkmanager "build-tools;34.0.0"
+
+          echo "D8_PATH=$ANDROID_HOME/build-tools/34.0.0/d8" >> "$GITHUB_ENV"
+
+          echo "=== D8 ==="
+          "$ANDROID_HOME/build-tools/34.0.0/d8" --version
+
+
+      # ============================================================
+      # Android NDK r27c
+      # ============================================================
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+
+      # ============================================================
+      # Install Ninja >= 1.11 (early)
+      # ============================================================
+      - name: Install Ninja >= 1.11 (early)
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "Download Ninja 1.11.1"
+          echo "============================================================"
+
+          curl -fL \
+            -o /tmp/ninja.zip \
+            https://github.com/ninja-build/ninja/releases/download/v1.11.1/ninja-linux.zip
+
+          sudo unzip -o /tmp/ninja.zip -d /usr/local/bin
+          sudo chmod +x /usr/local/bin/ninja
+
+          # Make new Ninja first in PATH for subsequent steps.
+          echo "PATH=/usr/local/bin:$PATH" >> "$GITHUB_ENV"
+
+          # Force CMake to use this exact Ninja binary.
+          echo "CMAKE_MAKE_PROGRAM=/usr/local/bin/ninja" >> "$GITHUB_ENV"
+
+          # Also disable C++ module scanning globally for CMake on CI to avoid requiring Ninja 1.11+
+          # This prevents CMake from failing when targets contain sources that "may use modules".
+          echo "CMAKE_CXX_SCAN_FOR_MODULES=OFF" >> "$GITHUB_ENV"
+
+          # Extra safety for tools explicitly using /usr/bin/ninja.
+          sudo ln -sf /usr/local/bin/ninja /usr/bin/ninja
+
+          # Gradle's externalNativeBuild does NOT use the Ninja on PATH:
+          # Android Gradle Plugin hardcodes CMAKE_MAKE_PROGRAM to the Ninja
+          # bundled inside the Android SDK's cmake dir (currently 1.10.2,
+          # which CMake rejects for C++20 module scanning). Replace every
+          # SDK-bundled Ninja with our 1.11.1 so the LSPlant Gradle CMake
+          # also gets a modern Ninja.
+          for NINJA_BIN in /usr/local/lib/android/sdk/cmake/*/bin/ninja; do
+            if [ -e "$NINJA_BIN" ]; then
+              sudo cp -f /usr/local/bin/ninja "$NINJA_BIN"
+              sudo chmod +x "$NINJA_BIN"
+              echo "Replaced $NINJA_BIN -> $(sudo "$NINJA_BIN" --version)"
+            fi
+          done
+
+          echo "============================================================"
+          echo "Ninja verification"
+          echo "============================================================"
+
+          /usr/local/bin/ninja --version
+          command -v ninja
+          ninja --version
+
+
+      # ============================================================
+      # Verify environment inherited by Gradle / CMake
+      # ============================================================
+      - name: Verify CMake / Ninja environment
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "Environment"
+          echo "============================================================"
+
+          echo "PATH=$PATH"
+          echo "CMAKE_MAKE_PROGRAM=$CMAKE_MAKE_PROGRAM"
+
+          echo ""
+          echo "============================================================"
+          echo "Ninja"
+          echo "============================================================"
+
+          command -v ninja
+          ninja --version
+
+          echo ""
+          echo "============================================================"
+          echo "CMake"
+          echo "============================================================"
+
+          command -v cmake
+          cmake --version
+
+          echo ""
+          echo "============================================================"
+          echo "D8"
+          echo "============================================================"
+
+          "${D8_PATH}" --version
+
+          echo ""
+          echo "============================================================"
+          echo "NDK"
+          echo "============================================================"
+
+          echo "NDK path:"
+          echo "${{ steps.setup-ndk.outputs.ndk-path }}"
+
+          test -f \
+            "${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake"
+
+
+      # ============================================================
+      # Configure top-level CMake
+      # ============================================================
+      - name: Configure CMake
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "Pre-configure Ninja check"
+          echo "============================================================"
+
+          echo "PATH=$PATH"
+          echo "CMAKE_MAKE_PROGRAM=$CMAKE_MAKE_PROGRAM"
+
+          command -v ninja
+          ninja --version
+
+          echo ""
+          echo "============================================================"
+          echo "Configure"
+          echo "============================================================"
+
+          cmake -B build \
+            -G Ninja \
+            -DCMAKE_MAKE_PROGRAM=/usr/local/bin/ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.setup-ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_D8="${D8_PATH}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF \
+            -DCMAKE_CXX_STANDARD=17
+
+
+      # ============================================================
+      # Build
+      # ============================================================
+      - name: Build
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "Build environment"
+          echo "============================================================"
+
+          echo "PATH=$PATH"
+          echo "CMAKE_MAKE_PROGRAM=$CMAKE_MAKE_PROGRAM"
+
+          command -v ninja
+          ninja --version
+
+          echo ""
+          echo "============================================================"
+          echo "Building"
+          echo "============================================================"
+
+          cmake --build build \
+            --config Release \
+            --parallel "$(nproc)"
+
+
+      # ============================================================
+      # Find and prepare output
+      # ============================================================
+      - name: Prepare payload
+        run: |
+          set -e
+
+          mkdir -p out
+
+          if [ ! -f "build/libdump_dex_payload.so" ]; then
+            echo "ERROR: libdump_dex_payload.so not found!"
+
+            echo ""
+            echo "All .so files:"
+            find build \
+              -type f \
+              -name "*.so" \
+              -print
+
+            exit 1
+          fi
+
+          cp \
+            build/libdump_dex_payload.so \
+            out/payload_dumpdex.so
+
+          echo ""
+          echo "============================================================"
+          echo "Payload"
+          echo "============================================================"
+
+          ls -lah out/
+          file out/payload_dumpdex.so
+
+
+      # ============================================================
+      # Upload artifact
+      # ============================================================
+      - name: Upload built payload
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload_dumpdex
+          path: out/payload_dumpdex.so
+          if-no-files-found: error
