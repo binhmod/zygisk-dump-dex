@@ -9,8 +9,12 @@ on:
 
 jobs:
   build:
-    name: Build Payload
+    name: Build Payload (${{ matrix.abi }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a]
 
     steps:
 
@@ -283,7 +287,7 @@ jobs:
             -G Ninja \
             -DCMAKE_MAKE_PROGRAM=/usr/local/bin/ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-29 \
             -DANDROID_D8="${D8_PATH}" \
             -DCMAKE_BUILD_TYPE=Release \
@@ -343,23 +347,23 @@ jobs:
 
           cp \
             build/libdump_dex_payload.so \
-            out/payload_dumpdex.so
+            "out/payload_dumpdex_${matrix.abi}.so"
 
           echo ""
           echo "============================================================"
-          echo "Payload"
+          echo "Payload (${{ matrix.abi }})"
           echo "============================================================"
 
           ls -lah out/
-          file out/payload_dumpdex.so
+          file "out/payload_dumpdex_${matrix.abi}.so"
 
 
       # ============================================================
-      # Upload artifact
+      # Upload artifact (unique per ABI)
       # ============================================================
       - name: Upload built payload
         uses: actions/upload-artifact@v4
         with:
-          name: payload_dumpdex
-          path: out/payload_dumpdex.so
+          name: payload_dumpdex-${{ matrix.abi }}
+          path: "out/payload_dumpdex_${matrix.abi}.so"
           if-no-files-found: error
