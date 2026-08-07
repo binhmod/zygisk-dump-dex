@@ -297,7 +297,7 @@ static void hook_all_dispatchers(JNIEnv *env) {
 }
 
 static JNIEnv *get_jni_env() {
-    typedef jint (*GetCreatedJavaVMs_t)(JavaVM *, jsize, void *);
+    typedef jint (*GetCreatedJavaVMs_t)(JavaVM **, jsize, jsize *);
 
     // JNI_GetCreatedJavaVMs lives in ART (libnativehelper) of the running
     // process, so resolve it at runtime instead of linking against it.
